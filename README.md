@@ -27,6 +27,10 @@ Runtime dependencies: `react`, `react-dom`, and jsQR, vendored in `src/vendor/js
 
 The camera only works on a secure page (https:// or localhost). To test on a phone, serve `dist/` over HTTPS.
 
+### GitHub Pages
+
+The Pages workflow builds and deploys `dist/` on pushes to `main`, or when run manually from the Actions tab. In repository settings, set **Pages → Build and deployment → Source** to **GitHub Actions**. The deployed site is available at https://iant89.github.io/OPTISEND/ after a successful deployment.
+
 ## Phase 2 — Sender
 
 - **Send screen:** native picker (multiple files), drag-and-drop on desktop, per-file remove / clear all, sizes and totals. Hashing runs in a Web Worker and is cached per file, so changing settings never re-hashes.
