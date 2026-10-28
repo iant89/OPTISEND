@@ -1,6 +1,7 @@
 /**
  * Frame scanning loop (spec §9.2–9.3): samples the live video at a controlled
- * rate, never runs more than one decode at a time, crops to the scan region,
+ * rate, never runs more than one decode at a time, locates the code in a
+ * half-size copy of the frame, crops around it (or to the scan region),
  * downscales, and hands accepted packets to the caller.
  */
 import { DecoderChain } from '../../qr/decoders/chain.ts';
@@ -8,7 +9,8 @@ import type { ScanHit } from '../../qr/decoders/types.ts';
 import { decodePacket } from '../../protocol/packet.ts';
 import { unframeScan } from '../../protocol/transport.ts';
 import { ProtocolError } from '../../protocol/errors.ts';
-import { scanRegion, targetScanSide, type ScanRegion } from './region.ts';
+import { locatorSide, regionForBox, scanRegion, targetScanSide, type ScanRegion } from './region.ts';
+import { locateQr } from '../../qr/detect/finder.ts';
 
 export interface ScannerOptions {
   /** Average upper bound on decode attempts per second. */
@@ -27,6 +29,10 @@ export interface ScannerStats {
   packets: number;
   /** QR codes that were not OptiSend packets (or had corrupt headers). */
   foreign: number;
+  /** Frames where the locator found a code's three finder patterns. */
+  framesLocated: number;
+  /** Frames not decoded because the locator found no code. */
+  framesSkipped: number;
   /** Recent decode rate. */
   fps: number;
   lastDecoder: string | null;
@@ -65,6 +71,36 @@ export function nextScanGap(maxFps: number, random: () => number = Math.random):
   return (1000 / maxFps) * (1 - SCAN_JITTER + 2 * SCAN_JITTER * random());
 }
 
+/** Which part of the frame to decode. */
+export type CropKind = 'located' | 'guide' | 'frame';
+
+/** On frames where the locator sees no code, still decode every n-th one, in case the locator missed it. */
+export const UNLOCATED_DECODE_EVERY = 3;
+
+export interface CropState {
+  /** Consecutive located frames that produced no code. */
+  locatedMisses: number;
+  /** Consecutive frames where the locator found nothing. */
+  unlocated: number;
+  /** Consecutive fallback decodes (unlocated frames) that produced no code. */
+  fallbackMisses: number;
+}
+
+/**
+ * Choose the crop for this frame, or null to skip decoding it.
+ *  - Code located: the tight crop around it, alternating with the guide square
+ *    after each miss (jsQR's failures on different crops are largely
+ *    independent, and dense codes sometimes decode only in the larger crop).
+ *  - Nothing located: skip, except every UNLOCATED_DECODE_EVERY-th frame,
+ *    which decodes the guide square, switching to the whole frame after two
+ *    misses (the pre-locator behaviour), so a locator miss costs little.
+ */
+export function chooseCrop(located: boolean, st: CropState): CropKind | null {
+  if (located) return st.locatedMisses % 2 === 0 ? 'located' : 'guide';
+  if (st.unlocated % UNLOCATED_DECODE_EVERY !== 0) return null;
+  return (st.fallbackMisses >> 1) % 2 === 0 ? 'guide' : 'frame';
+}
+
 type VideoWithRvfc = HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number; cancelVideoFrameCallback?: (h: number) => void };
 
 export class FrameScanner {
@@ -76,14 +112,14 @@ export class FrameScanner {
   private readonly random: () => number;
   private readonly canvas: HTMLCanvasElement | OffscreenCanvas;
   private readonly ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
+  private readonly locCanvas: HTMLCanvasElement | OffscreenCanvas;
+  private readonly locCtx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   private readonly recent: number[] = [];
   private _region: ScanRegion | null = null;
-  readonly stats: ScannerStats = { framesScanned: 0, framesWithCode: 0, packets: 0, foreign: 0, fps: 0, lastDecoder: null, lastVersion: null };
+  readonly stats: ScannerStats = { framesScanned: 0, framesWithCode: 0, packets: 0, foreign: 0, framesLocated: 0, framesSkipped: 0, fps: 0, lastDecoder: null, lastVersion: null };
   private readonly maxFps: number;
   private readonly fraction: number;
-  /** Index into the region cycle; sticks while codes are being found. */
-  private regionMode = 0;
-  private missesInMode = 0;
+  private readonly crop: CropState = { locatedMisses: 0, unlocated: 0, fallbackMisses: 0 };
 
   constructor(
     private readonly video: HTMLVideoElement,
@@ -95,10 +131,8 @@ export class FrameScanner {
     this.fraction = opts.regionFraction ?? 0.85;
     this.random = opts.random ?? Math.random;
     this.gap = nextScanGap(this.maxFps, this.random);
-    this.canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
-    const ctx = this.canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
-    if (!ctx) throw new Error('2D canvas unavailable');
-    this.ctx = ctx;
+    [this.canvas, this.ctx] = readableCanvas();
+    [this.locCanvas, this.locCtx] = readableCanvas();
   }
 
   /** Current scan region in video pixels (for drawing the on-screen guide). */
@@ -139,22 +173,47 @@ export class FrameScanner {
     const now = performance.now();
     if (!this.busy && now - this.lastAttempt >= this.gap && this.video.readyState >= 2 && this.video.videoWidth > 0) {
       this.lastAttempt = now;
-      this.gap = nextScanGap(this.maxFps, this.random);
-      void this.scanOnce(now);
+      void this.scanOnce(now).then((decoded) => {
+        // A frame the locator skipped cost a few ms, not a decode: look again on the next camera frame.
+        this.gap = decoded ? nextScanGap(this.maxFps, this.random) : 0;
+      });
     }
     this.schedule();
   }
 
-  private async scanOnce(now: number): Promise<void> {
+  /** One scan attempt. Resolves true if a decode ran, false if the frame was skipped. */
+  private async scanOnce(now: number): Promise<boolean> {
     this.busy = true;
     try {
       const vw = this.video.videoWidth;
       const vh = this.video.videoHeight;
-      // Alternate between the guide square and the whole frame until a code is found,
-      // so a phone held too close (code overflowing the guide) still scans.
-      const fraction = this.regionMode === 0 ? this.fraction : 1;
-      const r = scanRegion(vw, vh, fraction, targetScanSide(this.stats.lastVersion));
-      this._region = r;
+      const guide = scanRegion(vw, vh, this.fraction, targetScanSide(this.stats.lastVersion));
+      this._region = guide;
+
+      // Locate: whole frame at half size, read through the green channel.
+      const scale = locatorSide(Math.min(vw, vh)) / Math.min(vw, vh);
+      const lw = Math.max(1, Math.round(vw * scale));
+      const lh = Math.max(1, Math.round(vh * scale));
+      if (this.locCanvas.width !== lw || this.locCanvas.height !== lh) { this.locCanvas.width = lw; this.locCanvas.height = lh; }
+      this.locCtx.imageSmoothingEnabled = true;
+      this.locCtx.drawImage(this.video, 0, 0, lw, lh);
+      const loc = locateQr({ data: this.locCtx.getImageData(0, 0, lw, lh).data, width: lw, height: lh, stride: 4 });
+      if (loc) {
+        this.stats.framesLocated++;
+        this.crop.unlocated = 0;
+      } else {
+        this.crop.unlocated++;
+      }
+      const kind = chooseCrop(!!loc, this.crop);
+      if (!kind) {
+        this.stats.framesSkipped++;
+        return false;
+      }
+      const r =
+        kind === 'located' && loc ? regionForBox({ ...loc.box, module: loc.module }, scale, vw, vh)
+        : kind === 'guide' ? guide
+        : scanRegion(vw, vh, 1, targetScanSide(this.stats.lastVersion));
+
       if (this.canvas.width !== r.dSize) { this.canvas.width = r.dSize; this.canvas.height = r.dSize; }
       this.ctx.imageSmoothingEnabled = true;
       this.ctx.drawImage(this.video, r.sx, r.sy, r.sSize, r.sSize, 0, 0, r.dSize, r.dSize);
@@ -170,11 +229,9 @@ export class FrameScanner {
         return acceptHit(hit);
       });
       if (sawCode) this.stats.framesWithCode++;
-      if (res || sawCode) this.missesInMode = 0;
-      else if (++this.missesInMode >= 2) {
-        this.missesInMode = 0;
-        this.regionMode = (this.regionMode + 1) % 2;
-      }
+      const found = !!res || sawCode;
+      if (loc) this.crop.locatedMisses = found ? 0 : this.crop.locatedMisses + 1;
+      else this.crop.fallbackMisses = found ? 0 : this.crop.fallbackMisses + 1;
       if (res) {
         this.stats.packets++;
         this.stats.lastDecoder = res.decoderId;
@@ -183,10 +240,19 @@ export class FrameScanner {
       } else if (sawCode) {
         this.stats.foreign++;
       }
+      return true;
     } catch {
       /* a failed frame is just a missed frame */
+      return true;
     } finally {
       this.busy = false;
     }
   }
+}
+
+function readableCanvas(): [HTMLCanvasElement | OffscreenCanvas, CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D] {
+  const canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
+  const ctx = canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
+  if (!ctx) throw new Error('2D canvas unavailable');
+  return [canvas, ctx];
 }

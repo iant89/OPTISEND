@@ -4,8 +4,8 @@ import { DecoderChain } from '../src/qr/decoders/chain.ts';
 import { decodeWithJsQr } from '../src/qr/decoders/jsqr-core.ts';
 import type { FrameDecoder, ScanFrame, ScanHit } from '../src/qr/decoders/types.ts';
 import { encodeQr, type QrMatrix } from '../src/qr/encoder.ts';
-import { acceptHit } from '../src/features/receiver/scanner.ts';
-import { regionOnElement, scanRegion, targetScanSide } from '../src/features/receiver/region.ts';
+import { acceptHit, chooseCrop, UNLOCATED_DECODE_EVERY, type CropState } from '../src/features/receiver/scanner.ts';
+import { locatorSide, regionForBox, regionOnElement, scanRegion, targetScanSide } from '../src/features/receiver/region.ts';
 import { bitmapToSegments } from '../src/features/receiver/segments.ts';
 import { pickActiveSession } from '../src/features/receiver/ReceiveScreen.tsx';
 import { classifyCameraError, describeCameraError } from '../src/camera/camera.ts';
@@ -128,6 +128,37 @@ test('regionOnElement maps the scan square through object-fit: cover', () => {
   assert.ok(Math.abs(g.size - 150) < 0.01);
   assert.ok(Math.abs(g.top - 75) < 0.01);
   assert.ok(Math.abs(g.left - 120) < 0.01);
+});
+
+test('locator searches half the frame, never below 360 px or above the video', () => {
+  assert.equal(locatorSide(1080), 540);
+  assert.equal(locatorSide(720), 360);
+  assert.equal(locatorSide(480), 360);
+  assert.equal(locatorSide(300), 300);
+});
+
+test('regionForBox: square around the located code, in video pixels, ~8 px per module', () => {
+  // Box 200×180 at (300,100) in a half-size frame (scale 0.5), modules of 2 px → 100 modules across.
+  const r = regionForBox({ x: 300, y: 100, w: 200, h: 180, module: 2 }, 0.5, 1920, 1080);
+  assert.deepEqual(r, { sx: 600, sy: 180, sSize: 400, dSize: 400 }); // 800 px wanted, never upscaled
+  // Large, coarse code: downscaled to 8 px per module.
+  assert.equal(regionForBox({ x: 100, y: 50, w: 400, h: 400, module: 10 }, 0.5, 1920, 1080).dSize, 320);
+  // Near the edge: shifted to stay inside the video, never larger than its shorter side.
+  const e = regionForBox({ x: 900, y: 0, w: 60, h: 60, module: 2 }, 0.5, 1920, 1080);
+  assert.equal(e.sx + e.sSize, 1920);
+  assert.equal(e.sy, 0);
+  assert.equal(regionForBox({ x: 0, y: 0, w: 960, h: 540, module: 2 }, 0.5, 1920, 1080).sSize, 1080);
+});
+
+test('chooseCrop: tight crop while located, alternating with the guide after misses; sparse fallback otherwise', () => {
+  const st = (o: Partial<CropState>): CropState => ({ locatedMisses: 0, unlocated: 0, fallbackMisses: 0, ...o });
+  assert.equal(chooseCrop(true, st({})), 'located');
+  assert.equal(chooseCrop(true, st({ locatedMisses: 1 })), 'guide');
+  assert.equal(chooseCrop(true, st({ locatedMisses: 2 })), 'located');
+  // Unlocated frames are skipped except every n-th, which decodes guide ×2 then whole frame ×2.
+  const kinds = Array.from({ length: 4 * UNLOCATED_DECODE_EVERY }, (_, i) => chooseCrop(false, st({ unlocated: i + 1, fallbackMisses: Math.floor((i + 1) / UNLOCATED_DECODE_EVERY) - 1 })));
+  assert.equal(kinds.filter((k) => k === null).length, 4 * (UNLOCATED_DECODE_EVERY - 1));
+  assert.deepEqual(kinds.filter((k) => k !== null), ['guide', 'guide', 'frame', 'frame']);
 });
 
 // ─── Display helpers ───

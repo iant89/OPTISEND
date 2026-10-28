@@ -16,7 +16,7 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 139 unit tests (node:test via tsx)
+npm test             # 149 unit tests (node:test via tsx)
 npm run test:e2e     # 15 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
@@ -102,6 +102,23 @@ Each file's clock starts when its **first chunk is captured** and stops when the
   - A new transfer's record is saved immediately rather than after the 400 ms debounce, so its chunks can always be reattached after a reload.
   - Chunks with no saved record are reclaimed when the app opens.
 
+### QR locator (`src/qr/detect/finder.ts`)
+Before decoding, the scanner looks for the code's three finder patterns in a half-size copy of the whole frame (about 5 ms), then decodes a tight crop around the code instead of a fixed square in the middle.
+
+- **Finding:** local-threshold binarisation, a row scan for the finder's 1:1:3:1:1 run pattern, vertical, horizontal and diagonal cross-checks, then the three centres that form a QR-shaped right angle. It reports where the code is and its module size; it does not decode.
+- **Cropping:** a square around the code at about 8 px per module. After a miss on a located code the next scan uses the guide square instead; jsQR's failures on different crops are largely independent, and dense codes sometimes decode only in the larger crop.
+- **Empty frames:** when no code is found the frame is skipped and the scanner looks again on the next camera frame. Every 3rd such frame is still decoded the old way (guide square, then whole frame), so a locator miss costs little.
+- **Measured** (`tests/locator-sim.test.ts`, 24 simulated 1080p frames each, jsQR):
+
+  | Preset | Pose | Guide square | Tight crop, then guide |
+  |---|---|---|---|
+  | Conservative v15 | aimed | 21/24 | 21/24 |
+  | Conservative v15 | hand-held (off-centre, varied distance) | 9/24 | 21/24 |
+  | Balanced v25 | aimed | 9/24 | 9/24 |
+  | Balanced v25 | hand-held | 0/24 | 7/24 |
+
+  No false positives on 24 busy non-QR screens.
+
 ### Default transport is text-safe (Base45)
 The browser e2e test showed that desktop QR decoders return byte-mode content as *text* and cut it off at the first zero byte, so every binary frame was rejected (safely, by CRC/length checks). `BarcodeDetector.rawValue` and phone camera apps are text-only too. Text-safe mode works with any scanner and costs about 3% capacity. Binary mode stays available for receivers that read raw bytes.
 
@@ -115,6 +132,7 @@ The browser e2e test showed that desktop QR decoders return byte-mode content as
 | `src/features/sender/` | Scheduler, settings/estimates, frame pipeline, Send and Transmit screens |
 | `src/workers/` | Hash, QR-generation and scan (jsQR) workers, with automatic main-thread fallback |
 | `src/qr/decoders/` | Decoder plug-in interface, chain with per-decoder stats, native + jsQR plug-ins |
+| `src/qr/detect/` | Fast QR locator (finder patterns only, no decoding) |
 | `src/camera/` | Camera open/close and error classification |
 | `src/features/receiver/` | Scanner loop, scan-region geometry, Receive screen |
 | `src/features/files/` | Save / Save as… (streaming) / Share / Delete for verified files |

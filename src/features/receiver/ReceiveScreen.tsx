@@ -225,6 +225,7 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
             <p className="muted small">
               {scanStats.fps.toFixed(1)} scans/s · {scanStats.framesScanned.toLocaleString()} frames · {scanStats.packets.toLocaleString()} packets
               {scanStats.foreign ? ` · ${scanStats.foreign} other codes ignored` : ''}{scanStats.lastVersion ? ` · QR v${scanStats.lastVersion}` : ''}
+              {` · code located in ${scanStats.framesLocated.toLocaleString()} frames, ${scanStats.framesSkipped.toLocaleString()} empty frames skipped`}
             </p>
           )}
           {decoderStats.length > 0 && (
