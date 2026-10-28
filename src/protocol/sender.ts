@@ -10,7 +10,8 @@ import { sha256 } from '../crypto/sha256.ts';
 import { randomBytes } from '../crypto/bytes.ts';
 import { MANIFEST_FIXED_BYTES, MAX_MIME_BYTES, MAX_NAME_BYTES, SESSION_ID_BYTES } from './constants.ts';
 import { chunkRange, expectedChunkCount } from './chunking.ts';
-import { encodeDataPacket, encodeManifestPacket, manifestEntrySize, type ManifestEntry } from './packet.ts';
+import { encodeDataPacket, encodeManifestPacket, encodeRepairPacket, manifestEntrySize, type ManifestEntry } from './packet.ts';
+import { blockLayout, blockRange, coefficients, encodeRepairPayload, symbolLength } from './fountain.ts';
 import { DEFAULT_LIMITS, type ProtocolLimits } from './limits.ts';
 import { hashSource, type ByteSource } from './source.ts';
 import { sanitizeFileName, truncateUtf8 } from './filename.ts';
@@ -60,7 +61,20 @@ export class SenderError extends Error {
   override name = 'SenderError';
 }
 
+/** Source blocks kept in memory for building repair symbols (bytes). */
+const BLOCK_CACHE_BYTES = 32 * 1024 * 1024;
+
+/** A repair symbol to send: which block of which file, and which symbol of it. */
+export interface RepairRef {
+  fileId: number;
+  blockIndex: number;
+  symbolId: number;
+}
+
 export class TransferPlan {
+  private readonly blockCache = new Map<string, Uint8Array[]>();
+  private blockCacheBytes = 0;
+
   constructor(
     readonly sessionId: Uint8Array,
     readonly files: readonly PlannedFile[],
@@ -100,13 +114,86 @@ export class TransferPlan {
     });
   }
 
-  async packet(ref: PacketRef): Promise<Uint8Array> {
+  /**
+   * The packet to show for `ref` in pass `pass`. With `fountain`, data frames of
+   * pass 2 onwards become repair symbols (see repairRefFor): same frame count and
+   * order, so schedules, estimates and colour grouping are unchanged.
+   */
+  async packet(ref: PacketRef, pass = 1, fountain = false): Promise<Uint8Array> {
     if (ref.kind === 'manifest') {
       const m = this.manifestPackets[ref.part];
       if (!m) throw new RangeError(`unknown manifest part ${ref.part}`);
       return m;
     }
+    if (fountain && pass >= 2) {
+      const r = this.repairRefFor(ref.fileId, ref.chunkIndex, pass);
+      return this.repairPacket(r.fileId, r.blockIndex, r.symbolId);
+    }
     return this.dataPacket(ref.fileId, ref.chunkIndex);
+  }
+
+  /**
+   * In repair passes, the frame that carried chunk `chunkIndex` in pass 1 carries a
+   * repair symbol of block (chunkIndex mod blockCount): consecutive frames cycle
+   * through the blocks, so every block gets its share of repair symbols early in
+   * the pass. Symbol ids never repeat across passes.
+   */
+  repairRefFor(fileId: number, chunkIndex: number, pass: number): RepairRef {
+    const f = this.files[fileId];
+    if (!f) throw new RangeError(`unknown fileId ${fileId}`);
+    const { blockCount } = blockLayout(f.chunkCount);
+    const slotsPerPass = Math.ceil(f.chunkCount / blockCount);
+    return { fileId, blockIndex: chunkIndex % blockCount, symbolId: (pass - 2) * slotsPerPass + Math.floor(chunkIndex / blockCount) };
+  }
+
+  /** Build repair symbol `symbolId` of a block (PROTOCOL.md §5a). */
+  async repairPacket(fileId: number, blockIndex: number, symbolId: number): Promise<Uint8Array> {
+    const f = this.files[fileId];
+    if (!f) throw new RangeError(`unknown fileId ${fileId}`);
+    const { blockSize } = blockLayout(f.chunkCount);
+    const chunks = await this.blockChunks(f, blockSize, blockIndex);
+    const payload = encodeRepairPayload(chunks, coefficients(blockIndex, symbolId, chunks.length), symbolLength(f.fileSize, f.chunkSize, blockSize, blockIndex));
+    return encodeRepairPacket({
+      sessionId: this.sessionId,
+      fileId,
+      fileSize: f.fileSize,
+      chunkSize: f.chunkSize,
+      blockIndex,
+      blockSize,
+      symbolId: symbolId >>> 0,
+      fileHash: f.fileHash,
+      payloadHash: sha256(payload),
+      payload,
+    });
+  }
+
+  /** A block's chunks, read with one source read and cached (LRU by bytes). */
+  private async blockChunks(f: PlannedFile, blockSize: number, blockIndex: number): Promise<Uint8Array[]> {
+    const key = `${f.fileId}/${blockIndex}`;
+    const hit = this.blockCache.get(key);
+    if (hit) {
+      this.blockCache.delete(key);
+      this.blockCache.set(key, hit);
+      return hit;
+    }
+    const { start, end } = blockRange(f.chunkCount, blockSize, blockIndex);
+    const first = chunkRange(f.fileSize, f.chunkSize, start);
+    const last = chunkRange(f.fileSize, f.chunkSize, end - 1);
+    const bytes = await f.source.read(first.start, last.end - first.start);
+    if (bytes.length !== last.end - first.start) throw new SenderError(`short read for file ${f.fileId} block ${blockIndex}`);
+    const chunks: Uint8Array[] = [];
+    for (let i = start; i < end; i++) {
+      const r = chunkRange(f.fileSize, f.chunkSize, i);
+      chunks.push(bytes.subarray(r.start - first.start, r.end - first.start));
+    }
+    this.blockCache.set(key, chunks);
+    this.blockCacheBytes += bytes.length;
+    for (const [k, v] of this.blockCache) {
+      if (this.blockCacheBytes <= BLOCK_CACHE_BYTES || k === key) break;
+      this.blockCache.delete(k);
+      this.blockCacheBytes -= v.reduce((n, c) => n + c.length, 0);
+    }
+    return chunks;
   }
 
   /** One transmission pass: manifest, then every data packet, with periodic manifest repeats. */

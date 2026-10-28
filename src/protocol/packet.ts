@@ -14,6 +14,7 @@
 import { crc32 } from '../crypto/crc32.ts';
 import {
   COMMON_HEADER_BYTES,
+  REPAIR_HEADER_BYTES,
   CRC_BYTES,
   DATA_HEADER_BYTES,
   DEFINED_FLAGS_MASK,
@@ -30,6 +31,7 @@ import {
   SUPPORTED_VERSIONS,
 } from './constants.ts';
 import { expectedChunkCount } from './chunking.ts';
+import { MAX_REPAIR_BLOCK, symbolLength } from './fountain.ts';
 import { ProtocolError } from './errors.ts';
 import { DEFAULT_LIMITS, type ProtocolLimits } from './limits.ts';
 
@@ -75,7 +77,40 @@ export interface ManifestPacket {
   entries: ManifestEntry[];
 }
 
-export type Packet = DataPacket | ManifestPacket;
+/** Fountain repair symbol (PROTOCOL.md §5a). */
+export interface RepairPacket {
+  type: typeof PacketType.Repair;
+  version: number;
+  sessionId: Uint8Array;
+  fileId: number;
+  fileSize: number;
+  chunkSize: number;
+  chunkCount: number;
+  blockIndex: number;
+  /** Nominal chunks per source block for this file. */
+  blockSize: number;
+  symbolId: number;
+  fileHash: Uint8Array;
+  /** SHA-256 of the payload. */
+  payloadHash: Uint8Array;
+  /** XOR of the block's selected chunks, zero-padded to the block's first chunk length. View into the buffer. */
+  payload: Uint8Array;
+}
+
+export type Packet = DataPacket | ManifestPacket | RepairPacket;
+
+export interface RepairPacketInput {
+  sessionId: Uint8Array;
+  fileId: number;
+  fileSize: number;
+  chunkSize: number;
+  blockIndex: number;
+  blockSize: number;
+  symbolId: number;
+  fileHash: Uint8Array;
+  payloadHash: Uint8Array;
+  payload: Uint8Array;
+}
 
 export interface DataPacketInput {
   sessionId: Uint8Array;
@@ -172,6 +207,38 @@ export function encodeDataPacket(p: DataPacketInput): Uint8Array {
   return out;
 }
 
+export function encodeRepairPacket(p: RepairPacketInput): Uint8Array {
+  assertU(p.fileId, 16, 'fileId');
+  assertU(p.chunkSize, 32, 'chunkSize');
+  if (p.chunkSize === 0) throw new RangeError('chunkSize must be > 0');
+  if (p.fileHash.length !== HASH_BYTES || p.payloadHash.length !== HASH_BYTES) throw new RangeError('hashes must be 32 bytes');
+  const chunkCount = expectedChunkCount(p.fileSize, p.chunkSize);
+  assertU(chunkCount, 32, 'chunkCount');
+  if (!Number.isInteger(p.blockSize) || p.blockSize < 1 || p.blockSize > MAX_REPAIR_BLOCK) throw new RangeError(`blockSize must be 1..${MAX_REPAIR_BLOCK}`);
+  if (!Number.isInteger(p.blockIndex) || p.blockIndex < 0 || p.blockIndex * p.blockSize >= chunkCount) throw new RangeError('blockIndex out of range');
+  assertU(p.symbolId, 32, 'symbolId');
+  const expectedLen = symbolLength(p.fileSize, p.chunkSize, p.blockSize, p.blockIndex);
+  if (p.payload.length !== expectedLen) throw new RangeError(`payload length ${p.payload.length} != expected ${expectedLen}`);
+  assertU(p.payload.length, 16, 'payload length');
+
+  const out = new Uint8Array(REPAIR_HEADER_BYTES + p.payload.length);
+  const dv = new DataView(out.buffer);
+  writeCommon(dv, out, PacketType.Repair, REPAIR_HEADER_BYTES, p.payload.length, p.sessionId);
+  let o = COMMON_HEADER_BYTES;
+  dv.setUint16(o, p.fileId, false); o += 2;
+  writeU64(dv, o, p.fileSize); o += 8;
+  dv.setUint32(o, p.chunkSize, false); o += 4;
+  dv.setUint32(o, chunkCount, false); o += 4;
+  dv.setUint32(o, p.blockIndex, false); o += 4;
+  dv.setUint32(o, p.blockSize, false); o += 4;
+  dv.setUint32(o, p.symbolId, false); o += 4;
+  out.set(p.fileHash, o); o += HASH_BYTES;
+  out.set(p.payloadHash, o); o += HASH_BYTES;
+  sealHeader(out, dv, REPAIR_HEADER_BYTES);
+  out.set(p.payload, REPAIR_HEADER_BYTES);
+  return out;
+}
+
 /** Encoded size of one manifest entry. */
 export function manifestEntrySize(e: Pick<ManifestEntry, 'name' | 'mimeType'>): number {
   return MANIFEST_ENTRY_FIXED_BYTES + utf8.encode(e.mimeType).length + utf8.encode(e.name).length;
@@ -248,6 +315,8 @@ export function decodePacket(buf: Uint8Array, limits: ProtocolLimits = DEFAULT_L
 
   if (type === PacketType.Data) {
     if (headerLength !== DATA_HEADER_BYTES) fail('bad-header-length', `data header must be ${DATA_HEADER_BYTES}, got ${headerLength}`);
+  } else if (type === PacketType.Repair) {
+    if (headerLength !== REPAIR_HEADER_BYTES) fail('bad-header-length', `repair header must be ${REPAIR_HEADER_BYTES}, got ${headerLength}`);
   } else if (type === PacketType.Manifest) {
     if (headerLength < MANIFEST_FIXED_BYTES + MANIFEST_ENTRY_FIXED_BYTES + 1) fail('bad-header-length', `manifest header too short (${headerLength})`);
     if (payloadLength !== 0) fail('bad-payload-length', 'manifest packets carry no payload');
@@ -259,9 +328,9 @@ export function decodePacket(buf: Uint8Array, limits: ProtocolLimits = DEFAULT_L
   if (crc32(buf, 0, headerLength - CRC_BYTES) !== crcStored) fail('header-crc', 'header checksum mismatch');
 
   const sessionId = buf.subarray(10, 10 + SESSION_ID_BYTES);
-  return type === PacketType.Data
-    ? decodeData(buf, dv, version, sessionId, payloadLength, limits)
-    : decodeManifest(buf, dv, version, sessionId, headerLength, limits);
+  if (type === PacketType.Data) return decodeData(buf, dv, version, sessionId, payloadLength, limits);
+  if (type === PacketType.Repair) return decodeRepair(buf, dv, version, sessionId, payloadLength, limits);
+  return decodeManifest(buf, dv, version, sessionId, headerLength, limits);
 }
 
 function validateGeometry(fileSize: number, chunkSize: number, chunkCount: number, limits: ProtocolLimits): void {
@@ -306,6 +375,42 @@ function decodeData(buf: Uint8Array, dv: DataView, version: number, sessionId: U
     fileHash,
     chunkHash,
     payload: buf.subarray(DATA_HEADER_BYTES, DATA_HEADER_BYTES + payloadLength),
+  };
+}
+
+function decodeRepair(buf: Uint8Array, dv: DataView, version: number, sessionId: Uint8Array, payloadLength: number, limits: ProtocolLimits): RepairPacket {
+  let o = COMMON_HEADER_BYTES;
+  const fileId = dv.getUint16(o, false); o += 2;
+  const fileSize = readU64(dv, o); o += 8;
+  const chunkSize = dv.getUint32(o, false); o += 4;
+  const chunkCount = dv.getUint32(o, false); o += 4;
+  const blockIndex = dv.getUint32(o, false); o += 4;
+  const blockSize = dv.getUint32(o, false); o += 4;
+  const symbolId = dv.getUint32(o, false); o += 4;
+  const fileHash = buf.subarray(o, o + HASH_BYTES); o += HASH_BYTES;
+  const payloadHash = buf.subarray(o, o + HASH_BYTES); o += HASH_BYTES;
+
+  if (fileSize < 0) fail('bad-file-size', 'file size exceeds 2^53');
+  validateGeometry(fileSize, chunkSize, chunkCount, limits);
+  if (blockSize === 0 || blockSize > MAX_REPAIR_BLOCK) fail('bad-block', `block size ${blockSize}`);
+  if (blockIndex >= Math.ceil(chunkCount / blockSize)) fail('bad-block', `block ${blockIndex} beyond ${chunkCount} chunks of ${blockSize}`);
+  const expectedLen = symbolLength(fileSize, chunkSize, blockSize, blockIndex);
+  if (payloadLength !== expectedLen) fail('bad-payload-length', `repair payload ${payloadLength} != expected ${expectedLen}`);
+
+  return {
+    type: PacketType.Repair,
+    version,
+    sessionId,
+    fileId,
+    fileSize,
+    chunkSize,
+    chunkCount,
+    blockIndex,
+    blockSize,
+    symbolId,
+    fileHash,
+    payloadHash,
+    payload: buf.subarray(REPAIR_HEADER_BYTES, REPAIR_HEADER_BYTES + payloadLength),
   };
 }
 

@@ -241,6 +241,10 @@ export function SendScreen({ queue, setQueue, settings, setSettings, onStart, on
             <span>Text-safe encoding <span className="muted">(Base45 · for receivers whose scanner only returns text · ~3% slower)</span></span>
           </label>
           <label className="field check">
+            <input type="checkbox" checked={settings.fountain} onChange={(e: ChangeEvent<HTMLInputElement>) => update({ fountain: e.currentTarget.checked })} />
+            <span>Repair codes after the first pass <span className="muted">(fountain coding · each later code can fill any chunk the receiver missed, instead of repeating chunks · recommended)</span></span>
+          </label>
+          <label className="field check">
             <input type="checkbox" checked={settings.colorLayers === 3} onChange={(e: ChangeEvent<HTMLInputElement>) => update({ colorLayers: e.currentTarget.checked ? 3 : 1 })} />
             <span>Colour: 3 codes per frame <span className="muted">(experimental · red, green and blue layers · the receiver needs this OptiSend version)</span></span>
           </label>

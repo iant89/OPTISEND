@@ -16,8 +16,8 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 162 unit tests (node:test via tsx)
-npm run test:e2e     # 17 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
+npm test             # 171 unit tests (node:test via tsx)
+npm run test:e2e     # 19 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
 
@@ -171,6 +171,27 @@ From `bench/sendrate/REPORT.md` ("With ZXing: the scan cap was the bottleneck"):
 - **Repeat frames skipped:** a frame that looks the same as the last fully decoded one (32×32 thumbnail, `src/features/receiver/dedupe.ts`) isn't decoded again. This saves decodes and battery, not time. Shown in the diagnostics as "repeat frames skipped".
 - **100 ms per code by default:** twice as fast as 200 ms, and every code is still captured in the first pass in the simulator, including a dim-light 15 fps camera. 66 ms and 50 ms are offered as fast options (the sender says they need a 30 fps camera and good light). Settings still on an earlier default (200 ms, or 750 ms from v1) move to 100 ms; other choices are kept.
 
+### Fountain-coded repair passes (on by default)
+Spec: `docs/PROTOCOL.md` §5a. Code: `src/protocol/fountain.ts`.
+
+**What changes:**
+- Pass 1 is unchanged: every chunk is sent as a data packet.
+- From pass 2, the sender doesn't repeat chunks. Each frame instead carries a **repair code**: the XOR of a pseudo-random half of one block's chunks (blocks of at most 256 chunks).
+- Any repair code of a block can fill any chunk of that block the receiver missed. Once it holds as many repair codes as missing chunks (occasionally a few more), it rebuilds them by Gaussian elimination over GF(2).
+- Repair codes cycle through the blocks, so every block gets its share early in each pass.
+
+**Safety:**
+- Every repair code carries a SHA-256 of its payload and is checked before use.
+- Rebuilt chunks are stored like received ones, and a file is `verified` only when its full SHA-256 matches.
+- Repair packets use the reserved type `0x03`, which receivers from before this change reject while still reading pass 1. The setting is under Advanced on the Send screen ("Repair codes after the first pass").
+
+**Frames and display:** each repair pass has the same frames as pass 1, so time estimates, colour mode and file-list repeats are unchanged. The sender labels repair frames "repair code", and the receiver shows a "Rebuilt" count.
+
+**Measured:**
+- **Unit test, 700-chunk file (3 blocks), 15% of pass 1 lost:** the 105 missing chunks were rebuilt from 151 repair codes, about a fifth of a pass. Repeating passes has to wait for those exact chunks to come round again.
+- **Send-rate simulator, 40-chunk file:** fountain mode is never slower. When pass 1 misses codes (dim light, 15 fps camera, 66–50 ms per code), it finishes in 4.4–5.2 s instead of 5.5–6.3 s in 4 of 6 runs; in the other 2, both take the same time. When pass 1 catches everything, both are identical.
+- **Browser test (`e2e/receiver.test.ts`):** three pass-1 frames are cut from the film. The receiver rebuilds exactly those 3 chunks from pass-2 repair codes and saves both files byte-for-byte.
+
 ### Default transport is text-safe (Base45)
 The browser e2e test showed that desktop QR decoders return byte-mode content as *text* and cut it off at the first zero byte, so every binary frame was rejected (safely, by CRC/length checks). `BarcodeDetector.rawValue` and phone camera apps are text-only too. Text-safe mode works with any scanner and costs about 3% capacity. Binary mode stays available for receivers that read raw bytes.
 
@@ -178,7 +199,7 @@ The browser e2e test showed that desktop QR decoders return byte-mode content as
 
 | Path | Purpose |
 |------|---------|
-| `src/protocol/` | Wire format, sender packetizer, receiver engine (Phase 1) |
+| `src/protocol/` | Wire format, sender packetizer, receiver engine (Phase 1), fountain-code repair (`fountain.ts`) |
 | `src/qr/encoder.ts` | QR Model 2 encoder: byte/alphanumeric, v1–40, L/M/Q/H, automatic masking |
 | `src/qr/render.ts` | Crisp canvas rendering and layout math |
 | `src/features/sender/` | Scheduler, settings/estimates, frame pipeline, Send and Transmit screens |

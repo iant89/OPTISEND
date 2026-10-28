@@ -23,6 +23,8 @@ export type RejectReason =
   | 'bad-mime'
   | 'bad-manifest'
   | 'chunk-hash-mismatch'
+  | 'bad-block'
+  | 'repair-hash-mismatch'
   | 'metadata-conflict'
   | 'limit-exceeded'
   | 'unrecognised-encoding';

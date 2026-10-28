@@ -35,21 +35,24 @@ const FILES = [
   { name: 'notes.txt', mimeType: 'text/plain', buffer: Buffer.from('Received through a camera, verified with SHA-256. '.repeat(14)) },
 ];
 
+interface Shot { path: string; /** The sender's description of the frame, e.g. "File 1 of 2 · chunk 3 of 9". */ label: string }
+
 /** Run the sender app and screenshot every distinct code it displays. */
-async function recordSender(browser: Browser, colour: boolean): Promise<string[]> {
+async function recordSender(browser: Browser, opts: { colour: boolean; passes: 1 | 2; prefix: string }): Promise<Shot[]> {
+  const { colour } = opts;
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await page.goto(server.url);
   await page.getByRole('button', { name: /Send files/ }).click();
   await page.setInputFiles('#file-input', FILES);
   await page.getByText('1 s', { exact: true }).click();
-  await page.getByText('1×').click();
+  await page.getByText(`${opts.passes}×`).click();
   if (colour) {
     await page.getByText('Advanced').click();
     await page.getByLabel(/Colour: 3 codes per frame/).check();
   }
   await page.getByText('Ready to transmit.').waitFor({ timeout: 15_000 });
   await page.getByRole('button', { name: 'Start transfer' }).click();
-  const shots: string[] = [];
+  const shots: Shot[] = [];
   let last = '';
   const t0 = Date.now();
   while (Date.now() - t0 < 120_000) {
@@ -59,9 +62,10 @@ async function recordSender(browser: Browser, colour: boolean): Promise<string[]
     });
     if (sig && sig !== last) {
       last = sig;
-      const p = join(dir, `shot${String(shots.length).padStart(3, '0')}.png`);
+      const p = join(dir, `${opts.prefix}${String(shots.length).padStart(3, '0')}.png`);
       await page.screenshot({ path: p });
-      shots.push(p);
+      const label = await page.locator('.frame-info').innerText();
+      shots.push({ path: p, label });
     }
     if (await page.locator('.transmit.state-finished').count()) break;
     await page.waitForTimeout(80);
@@ -70,19 +74,39 @@ async function recordSender(browser: Browser, colour: boolean): Promise<string[]
   return shots;
 }
 
-for (const colour of [false, true]) test(`sender app → simulated phone camera → receiver app${colour ? ' (colour: 3 codes per frame)' : ''}: files verified and saved byte-for-byte`, { skip: !hasCv2 && 'python3/OpenCV not available', timeout: 300_000 }, async () => {
+const VARIANTS = [
+  { title: '', colour: false, fountain: false },
+  { title: ' (colour: 3 codes per frame)', colour: true, fountain: false },
+  { title: ' (fountain: pass-1 codes never seen, rebuilt from repair codes)', colour: false, fountain: true },
+] as const;
+
+for (const { title, colour, fountain } of VARIANTS) test(`sender app → simulated phone camera → receiver app${title}: files verified and saved byte-for-byte`, { skip: !hasCv2 && 'python3/OpenCV not available', timeout: 300_000 }, async () => {
   const senderBrowser = await chromium.launch();
-  let shots: string[];
+  let shots: Shot[];
   try {
-    shots = await recordSender(senderBrowser, colour);
+    shots = await recordSender(senderBrowser, { colour, passes: fountain ? 2 : 1, prefix: fountain ? 'fountain' : colour ? 'colour' : 'shot' });
   } finally {
     await senderBrowser.close();
   }
   // 15 packets: one per frame in black and white; data packets three per frame in colour.
   assert.ok(shots.length >= (colour ? 5 : 10), `captured ${shots.length} codes`);
+  let dropped = 0;
+  if (fountain) {
+    // Pass 2 shows repair codes (fountain coding is on by default). Remove some pass-1 data frames from
+    // the film, so those chunks are never seen directly and can only be rebuilt from repair codes.
+    assert.ok(shots.some((s) => /repair code/.test(s.label)), `pass 2 shows repair codes: ${shots.map((s) => s.label.split('\n')[1]).join(' | ')}`);
+    const pass1Data = shots.filter((s) => /Pass 1/.test(s.label) && /chunk \d+ of/.test(s.label));
+    const lose = new Set([
+      ...pass1Data.filter((s) => /File 1 of/.test(s.label)).slice(1, 3),
+      ...pass1Data.filter((s) => /File 2 of/.test(s.label)).slice(1, 2),
+    ]);
+    assert.equal(lose.size, 3);
+    shots = shots.filter((s) => !lose.has(s));
+    dropped = lose.size;
+  }
 
-  const video = join(dir, colour ? 'camera-colour.y4m' : 'camera.y4m');
-  const mk = spawnSync('python3', ['scripts/make_camera_video.py', video, '6', '7', ...shots], { encoding: 'utf8' });
+  const video = join(dir, fountain ? 'camera-fountain.y4m' : colour ? 'camera-colour.y4m' : 'camera.y4m');
+  const mk = spawnSync('python3', ['scripts/make_camera_video.py', video, '6', '7', ...shots.map((s) => s.path)], { encoding: 'utf8' });
   assert.equal(mk.status, 0, mk.stderr);
 
   const rxBrowser = await chromium.launch({
@@ -134,6 +158,9 @@ for (const colour of [false, true]) test(`sender app → simulated phone camera 
     assert.ok(got.equals(f.buffer), `${f.name} content differs`);
   }
   const diag = await page.evaluate(() => document.querySelector('.stats.compact')?.textContent ?? '');
+  // Chunks rebuilt from repair codes: exactly the ones cut from the film in the fountain run, none otherwise.
+  const rebuilt = Number(/Rebuilt([\d,]+)/.exec(diag)?.[1]?.replace(/,/g, '') ?? 0);
+  assert.equal(rebuilt, dropped, `rebuilt chunks (stats: ${diag})`);
   console.log(`# ${shots.length} codes filmed; receiver stats: ${diag}`);
   const scanInfo = await page.evaluate(() => document.querySelector('.receive details p.muted.small')?.textContent ?? '');
   console.log(`# scanner: ${scanInfo}`);

@@ -27,7 +27,7 @@ The **last 4 bytes of every header** are a CRC-32 of all preceding header bytes.
 |-------:|-----:|-----------------|-------|
 | 0      | 2    | magic           | `0x4F53` (`"OS"`) |
 | 2      | 1    | version         | `1` |
-| 3      | 1    | type            | `0x01` manifest, `0x02` data, `0x03` parity (reserved; rejected by v1) |
+| 3      | 1    | type            | `0x01` manifest, `0x02` data, `0x03` repair (§5a; receivers that predate it reject it as an unsupported type) |
 | 4      | 1    | flags           | No flags defined in v1. **Any set bit is rejected.** Bit 0 reserved for "payload compressed". |
 | 5      | 1    | hashAlgorithm   | `0x01` = SHA-256 (only value in v1) |
 | 6      | 2    | headerLength    | Includes the trailing CRC |
@@ -93,6 +93,50 @@ Entry:
 
 A session's manifest may be split into several parts; each part is independently valid. Senders pack entries greedily up to the QR packet budget; an entry that cannot fit alone becomes its own (larger) part.
 
+## 5a. Repair packet (type 0x03) — fountain code, header is exactly 116 bytes
+
+A sender may follow the first pass of data packets with **repair symbols**: systematic fountain coding over GF(2). Each repair symbol is the XOR of a pseudo-random subset of one source block's chunks. A receiver missing *m* chunks of a block rebuilds them from any *m* repair symbols of that block (occasionally a few more), whichever symbols those are. Data and manifest packets are unchanged, so a receiver that predates repair packets still receives everything sent as data.
+
+| Offset | Size | Field        |
+|-------:|-----:|--------------|
+| 0      | 18   | common header |
+| 18     | 2    | fileId       |
+| 20     | 8    | fileSize     |
+| 28     | 4    | chunkSize    |
+| 32     | 4    | chunkCount   |
+| 36     | 4    | blockIndex   |
+| 40     | 4    | blockSize    | nominal chunks per source block (1–1024) |
+| 44     | 4    | symbolId     | any u32; a sender never repeats one for a block |
+| 48     | 32   | fileHash     |
+| 80     | 32   | payloadHash  | SHA-256 of this payload |
+| 112    | 4    | headerCrc32  |
+
+Like data packets, repair packets are self-describing: a receiver can create the file record from one.
+
+**Blocks.** Chunk *i* belongs to block ⌊*i* / blockSize⌋. A block covers chunks [blockIndex × blockSize, min((blockIndex + 1) × blockSize, chunkCount)), so *n* = its chunk count. Senders choose blockSize = ⌈chunkCount / ⌈chunkCount / 256⌉⌉ (blocks of at most 256 chunks, as equal as possible); a file's blockSize must not change. Receivers enforce 1 ≤ blockSize ≤ 1024 and blockIndex < ⌈chunkCount / blockSize⌉.
+
+**Payload.** Its length L is the length of the block's first chunk (`min(chunkSize, fileSize − blockIndex × blockSize × chunkSize)`). The payload is the XOR of the selected chunks, each zero-padded to L.
+
+**Coefficients.** Which of the block's *n* chunks symbol `symbolId` combines is a bitset: bit *j* of word ⌊*j*/32⌋ selects chunk *j*. All arithmetic is unsigned 32-bit, wrapping:
+
+```
+fmix32(h):  h ^= h >>> 16;  h *= 0x85EBCA6B;  h ^= h >>> 13;  h *= 0xC2B2AE35;  h ^= h >>> 16
+base      = fmix32(fmix32(blockIndex XOR 0x9E3779B9) XOR symbolId)
+word w    = fmix32(base + (w + 1) × 0x9E3779B9)          for w = 0 … ⌈n/32⌉ − 1
+```
+
+Bits at positions ≥ *n* are cleared. If no bit is set, bit (symbolId mod *n*) is set. Each chunk is included with probability ½. The generator must be non-linear over GF(2): a linear one (such as xorshift) confines every symbol of a block to a 32-dimensional subspace, so blocks missing more than 32 chunks could never be rebuilt.
+
+**Receiving.**
+1. Reject a symbol whose payload does not match `payloadHash` (`repair-hash-mismatch`) before keeping anything, so a damaged symbol cannot poison a solve.
+2. Ignore symbols for verified files, for blocks with nothing missing, and duplicates (same block and symbolId).
+3. When a block holds at least as many symbols as it has missing chunks, solve: XOR the known chunks out of each symbol, then Gauss–Jordan eliminate over the missing ones. If the symbols do not determine every missing chunk yet, wait for more.
+4. A rebuilt chunk is truncated to its length (any padding must decode to zero bytes) and stored like a received chunk. Only after the write succeeds is it counted. Its fingerprint is computed from its bytes, and the file is `verified` only when the full-file SHA-256 matches, as for data.
+
+The reference receiver keeps at most (missing + 8) symbols per block, dropping the oldest, and at most 64 MiB of symbols in total. Symbols live in memory only, and a reload collects new ones.
+
+**Sending.** The reference sender sends pass 1 as data packets. Each later pass has the same frames, but the frame that carried chunk *c* carries a repair symbol of block (*c* mod blockCount), with symbolId = (pass − 2) × ⌈chunkCount / blockCount⌉ + ⌊*c* / blockCount⌋. Consecutive frames therefore cycle through the blocks, and symbol ids never repeat.
+
 ## 6. Receiver acceptance rules
 
 Rejected outright (structural): bad magic, unsupported version/type/flags/hash algorithm, length mismatch, wrong header length for the type, CRC failure, any geometry violation, invalid UTF-8, limits exceeded.
@@ -146,4 +190,4 @@ These are starting points; practical limits must come from device calibration (s
 
 ## 10. Versioning
 
-Receivers reject unknown versions, packet types and flag bits rather than guessing. A future version that adds compression, parity packets (FEC) or signed manifests must bump the version or define the flag/type and be rejected cleanly by v1 receivers.
+Receivers reject unknown versions, packet types and flag bits rather than guessing. A future extension that adds compression or signed manifests must bump the version or define a flag/type that earlier receivers reject cleanly. Repair packets (§5a) did this: they define type `0x03`, which receivers built before them reject as an unsupported type while still accepting the data packets of the same transfer.

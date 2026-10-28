@@ -45,7 +45,7 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
     [frames],
   );
   const encoder = useMemo(() => new QrEncoderClient(), []);
-  const renderer = useMemo(() => new FrameRenderer(plan, cfg, encoder), [plan, cfg, encoder]);
+  const renderer = useMemo(() => new FrameRenderer(plan, cfg, encoder, 16, settings.fountain), [plan, cfg, encoder, settings.fountain]);
 
   const [matrix, setMatrix] = useState<QrMatrix[] | null>(null);
   const [frame, setFrame] = useState<FrameEvent<PacketRef[]> | null>(null);
@@ -152,11 +152,14 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
   const group = frame?.frame;
   const ref = group?.[0];
   const layers = group?.length ?? 1;
+  // From pass 2, fountain mode turns data frames into repair symbols for the same file.
+  const repair = settings.fountain && (frame?.pass ?? 1) >= 2 && ref?.kind === 'data';
   const file = ref?.kind === 'data' ? plan.files[ref.fileId] : undefined;
   const passLabel = settings.passes === 'continuous' ? `Pass ${frame?.pass ?? 1}` : `Pass ${frame?.pass ?? 1} of ${scheduler.passes}`;
   const remainingMs = scheduler.passDurationMs() * ((frames.length - 1 - (frame?.index ?? 0)) / frames.length);
   const qrLabel = !ref ? 'Preparing first QR code'
     : ref.kind === 'manifest' ? `QR code: file list, part ${ref.part + 1} of ${plan.manifestPackets.length}`
+    : repair ? `QR code: repair data for ${file?.name}${layers > 1 ? ` (${layers} in colour)` : ''}`
     : layers > 1 ? `Colour QR code with ${layers} chunks, starting at ${file?.name}, chunk ${ref.chunkIndex + 1} of ${file?.chunkCount}`
     : `QR code: ${file?.name}, chunk ${ref.chunkIndex + 1} of ${file?.chunkCount}`;
 
@@ -173,7 +176,9 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
             <>
               <p className="frame-file" title={file.name}>{file.name}</p>
               <p className="muted">
-                File {ref.fileId + 1} of {plan.files.length} · chunk {(ref.chunkIndex + 1).toLocaleString()} of {file.chunkCount.toLocaleString()}{layers > 1 ? ` · ${layers} chunks in colour` : ''}
+                {repair
+                  ? <>File {ref.fileId + 1} of {plan.files.length} · repair code{layers > 1 ? `s · ${layers} in colour` : ''} <span title="Each repair code can replace any chunk of this file the receiver missed">(fills any missed chunk)</span></>
+                  : <>File {ref.fileId + 1} of {plan.files.length} · chunk {(ref.chunkIndex + 1).toLocaleString()} of {file.chunkCount.toLocaleString()}{layers > 1 ? ` · ${layers} chunks in colour` : ''}</>}
               </p>
             </>
           ) : (

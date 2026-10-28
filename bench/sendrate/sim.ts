@@ -88,7 +88,7 @@ export interface Prepared {
   plan: TransferPlan;
   frames: PacketRef[];
   durations: number[]; // in units of intervalMs (manifest = 2)
-  /** views[variant][frameIndex]: camera view of each code; variant = pass % VARIANTS. */
+  /** views[variant][frameIndex]: camera view of each code; variant = pass index % views.length. */
   views: Uint8Array[][];
   packets: Uint8Array[];
   w: number;
@@ -122,7 +122,14 @@ function noise(): Int8Array {
  * @param rotateMasks model a sender that uses a different QR mask each pass
  *   (pass variant v uses mask (auto + 3v) mod 8) — same content, different module pattern.
  */
-export async function prepare(seed: number, dataCodes = 40, w = 1280, h = 720, rotateMasks = false): Promise<Prepared> {
+/** Passes rendered for a fountain sender (each repair pass shows different codes). */
+const FOUNTAIN_VARIANTS = 6;
+
+/**
+ * @param fountain model a sender with fountain repair (implies rotating masks): pass 1 sends
+ *   the data packets, later passes repair symbols — every pass is rendered separately.
+ */
+export async function prepare(seed: number, dataCodes = 40, w = 1280, h = 720, rotateMasks = false, fountain = false): Promise<Prepared> {
   const cfg = resolveQrConfig(DEFAULT_SETTINGS);
   const fileSize = cfg.chunkSize * dataCodes - 17;
   const data = new Uint8Array(fileSize).map((_, i) => (i * 131 + seed * 7) & 0xff);
@@ -135,16 +142,22 @@ export async function prepare(seed: number, dataCodes = 40, w = 1280, h = 720, r
   const toBits = (m: { size: number; modules: Uint8Array }) => ({ size: m.size, bits: Array.from(m.modules, (v) => (v ? '1' : '0')).join('') });
   const auto = packets.map((p) => encodeQr(frameForQr(p, cfg.transport), { ecc: cfg.ecc, minVersion: cfg.version }));
   const codes = auto.map(toBits);
-  const codesByVariant = rotateMasks
-    ? Array.from({ length: VARIANTS }, (_, v) => packets.map((p, i) => toBits(encodeQr(frameForQr(p, cfg.transport), { ecc: cfg.ecc, minVersion: cfg.version, mask: (auto[i]!.mask + 3 * v) % 8 }))))
-    : undefined;
+  const variants = fountain ? FOUNTAIN_VARIANTS : VARIANTS;
+  const codesByVariant = fountain
+    ? await Promise.all(Array.from({ length: variants }, async (_, v) => {
+      const pk = await Promise.all(frames.map((f) => plan.packet(f, v + 1, true)));
+      return pk.map((p) => toBits(encodeQr(frameForQr(p, cfg.transport), { ecc: cfg.ecc, minVersion: cfg.version, maskOffset: (v * 3) % 8 })));
+    }))
+    : rotateMasks
+      ? Array.from({ length: variants }, (_, v) => packets.map((p, i) => toBits(encodeQr(frameForQr(p, cfg.transport), { ecc: cfg.ecc, minVersion: cfg.version, mask: (auto[i]!.mask + 3 * v) % 8 }))))
+      : undefined;
   const dir = mkdtempSync(join(tmpdir(), 'sendrate-'));
   const out = join(dir, 'views.bin');
-  const r = spawnSync('python3', ['bench/sendrate/render_views.py'], { input: JSON.stringify({ w, h, seed, variants: VARIANTS, out, codes, ...(codesByVariant ? { codesByVariant } : {}) }), encoding: 'utf8', maxBuffer: 1 << 26 });
+  const r = spawnSync('python3', ['bench/sendrate/render_views.py'], { input: JSON.stringify({ w, h, seed, variants, out, codes, ...(codesByVariant ? { codesByVariant } : {}) }), encoding: 'utf8', maxBuffer: 1 << 26 });
   if (r.status !== 0) throw new Error(r.stderr);
   const raw = readFileSync(out);
   rmSync(dir, { recursive: true, force: true });
-  const views = Array.from({ length: VARIANTS }, (_, v) => codes.map((_, i) => new Uint8Array(raw.buffer, raw.byteOffset + (v * codes.length + i) * w * h, w * h)));
+  const views = Array.from({ length: variants }, (_, v) => codes.map((_, i) => new Uint8Array(raw.buffer, raw.byteOffset + (v * codes.length + i) * w * h, w * h)));
   return { plan, frames, durations, views, packets, w, h, version: cfg.version, fileSize };
 }
 
@@ -173,7 +186,7 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
     let lo = 0, hi = switches.length - 2;
     if (t < switches[0]!) return { idx: n - 1, end: switches[0]!, variant: 0 }; // blank before start ≈ last code
     while (lo < hi) { const mid = (lo + hi + 1) >> 1; if (switches[mid]! <= t) lo = mid; else hi = mid - 1; }
-    return { idx: lo % n, end: switches[lo + 1]!, variant: Math.floor(lo / n) % VARIANTS };
+    return { idx: lo % n, end: switches[lo + 1]!, variant: Math.floor(lo / n) % p.views.length };
   };
   // Camera clock drifts slightly against the screen (±0.2%) with ±1 ms timestamp jitter.
   const camPeriod = (1000 / fps) * (1 + (rnd() - 0.5) * 0.004);
@@ -277,7 +290,8 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
     // Which code was it? (match bytes against the plan's packets)
     const which = p.packets.findIndex((q) => q.length === pkt.length && q.every((v, i) => v === pkt[i]));
     if (which >= 0 && dataIdx.has(which) && decodeFreeAt < passMs) capturedFirstPass.add(which);
-    if (res.status === 'accepted' && res.fileStatus === 'verified') { completeMs = decodeFreeAt; break; }
+    // The last missing chunk can arrive as a data packet or be rebuilt from a repair symbol.
+    if ((res.status === 'accepted' || res.status === 'repair') && res.fileStatus === 'verified') { completeMs = decodeFreeAt; break; }
   }
 
   const payload = p.fileSize;

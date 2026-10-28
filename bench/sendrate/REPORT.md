@@ -188,3 +188,19 @@ The tear is usually a soft blend over part of the code, which QR error correctio
 5. **100 ms is the new default.** It's twice as fast as 200 ms and still 100% first-pass in every pose, on both device speeds and in dim light. 66 ms and 50 ms are offered as fast options that need a 30 fps camera and good light.
 
 Caveats: the simulator has no autofocus hunting, motion blur or dropped camera frames, and the 8 ms capture cost is an estimate. Confirm on real devices.
+
+## Fountain-coded repair passes (implemented, on by default)
+
+`sim.ts` can now model a fountain sender (`prepare(..., fountain = true)`): pass 1 shows the data packets, and every later pass shows its own repair codes (`docs/PROTOCOL.md` §5a), rendered per pass. Same scanner as above (ZXing, no cap, pipeline, duplicate skipping, 8 ms capture), 40 data codes, up to 8 passes. Time to verified (passes in brackets):
+
+| Condition | Per code | Seed | Repeat passes | Fountain repair |
+|---|---|---|---|---|
+| Dim light (15 fps, 33 ms exposure) | 50 ms | 1 | 6.2 s (2.94) | **4.4 s (2.08)** |
+| Dim light | 66 ms | 2 | 5.5 s (1.99) | **4.6 s (1.65)** |
+| Dim light | 50 ms | 2 | 4.2 s (1.99) | 4.2 s (1.99) |
+| Dim light | 66 ms | 3 | 6.3 s (2.27) | **5.2 s (1.87)** |
+| Dim light | 50 ms | 3 | 6.0 s (2.87) | **4.8 s (2.30)** |
+
+All other runs (30 fps at 100/66/50 ms, dim light at 100 ms, the 3× slower device) finish in the first pass with identical times in both modes. So fountain mode costs nothing when pass 1 catches everything and helps when it doesn't.
+
+The gain grows with file size. Repeating has to wait for the exact missing chunks to come round again, which for a large file can take most of a pass. A repair code fills whichever chunk is missing. In the unit test with a 700-chunk file and 15% of pass 1 lost, 151 repair codes (0.22 pass) rebuilt all 105 missing chunks. The simulator uses a 40-chunk file because every pass needs its own rendered camera views.

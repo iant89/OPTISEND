@@ -215,13 +215,45 @@ test('accessibility basics: names, focus, touch targets, no horizontal scroll', 
   await page.close();
 });
 
+/** Two passes of a 900-byte file at 500 ms per code (slow enough to capture every frame); `fountain` sets the repair-code option. */
+async function twoPasses(fountain: boolean): Promise<Captured[]> {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await page.goto(server.url);
+  await page.getByRole('button', { name: /Send files/ }).click();
+  await page.setInputFiles('#file-input', [{ name: 'm.bin', mimeType: '', buffer: bytes(900, 5) }]);
+  await page.getByText('500 ms').click();
+  await page.getByText('2×').click();
+  await page.getByText('Advanced').click();
+  await page.getByLabel(/Repair codes after the first pass/).setChecked(fountain);
+  await page.getByText('Ready to transmit.').waitFor();
+  await page.getByRole('button', { name: 'Start transfer' }).click();
+  const frames = await captureFrames(page);
+  await page.close();
+  return frames;
+}
+
+const packetOf = (f: Captured) => {
+  const { content } = readPixelPerfectQr(f.n, Uint8Array.from(f.bits, (c) => (c === '1' ? 1 : 0)));
+  return (typeof content === 'string' ? unframeScan({ text: content }) : unframeScan({ bytes: content }))!;
+};
+
+test('with repair codes on (the default), pass 2 shows repair packets, never repeated data', { timeout: 120_000 }, async () => {
+  const types = (await twoPasses(true)).map((f) => packetOf(f)[3]); // byte 3 = packet type
+  const data = types.filter((t) => t === 0x02).length;
+  const repair = types.filter((t) => t === 0x03).length;
+  assert.ok(data >= 3 && repair === data, `data ${data}, repair ${repair}: ${types.join(',')}`);
+});
+
 test('the sender rotates the QR mask each pass: same packet, different pattern, identical bytes', { timeout: 120_000 }, async () => {
+  // With repair codes off, pass 2 repeats pass 1's packets — this is where mask rotation matters.
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await page.goto(server.url);
   await page.getByRole('button', { name: /Send files/ }).click();
   await page.setInputFiles('#file-input', [{ name: 'm.bin', mimeType: '', buffer: bytes(900, 5) }]);
   await page.getByText('500 ms').click(); // slow enough to capture every frame reliably
   await page.getByText('2×').click();
+  await page.getByText('Advanced').click();
+  await page.getByLabel(/Repair codes after the first pass/).uncheck();
   await page.getByText('Ready to transmit.').waitFor();
   await page.getByRole('button', { name: 'Start transfer' }).click();
   const frames = await captureFrames(page);

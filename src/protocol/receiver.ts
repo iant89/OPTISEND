@@ -19,7 +19,8 @@ import { PacketType } from './constants.ts';
 import { ProtocolError, type RejectReason } from './errors.ts';
 import { sanitizeFileName } from './filename.ts';
 import { resolveLimits, type ProtocolLimits } from './limits.ts';
-import { decodePacket, type DataPacket, type ManifestPacket } from './packet.ts';
+import { decodePacket, type DataPacket, type ManifestPacket, type RepairPacket } from './packet.ts';
+import { blockRange, coefficients, solveBlock } from './fountain.ts';
 
 // ───────────────────────────── Types ─────────────────────────────
 
@@ -31,7 +32,9 @@ export type IngestResult =
   | { status: 'manifest'; sessionId: string; part: number; newFiles: number }
   | { status: 'conflict'; sessionId: string; fileId?: number; chunkIndex?: number; detail: string }
   | { status: 'rejected'; reason: RejectReason; detail: string }
-  | { status: 'storage-error'; sessionId: string; fileId: number; chunkIndex: number; detail: string };
+  | { status: 'storage-error'; sessionId: string; fileId: number; chunkIndex: number; detail: string }
+  /** A repair symbol was kept; `recovered` chunks were rebuilt from repair symbols because of it. */
+  | { status: 'repair'; sessionId: string; fileId: number; blockIndex: number; recovered: number; fileStatus: FileStatus };
 
 export interface ReceiverStats {
   packetsSeen: number;
@@ -41,7 +44,22 @@ export interface ReceiverStats {
   rejected: number;
   conflicts: number;
   storageFailures: number;
+  /** Repair symbols kept for decoding. */
+  repairSymbols: number;
+  /** Chunks rebuilt from repair symbols. */
+  recoveredChunks: number;
   rejectReasons: Partial<Record<RejectReason, number>>;
+}
+
+/** Repair symbols kept per block beyond the number of missing chunks (rank slack). */
+export const REPAIR_SLACK = 8;
+/** Memory for buffered repair symbols across all files (bytes). Further symbols are dropped until it frees up. */
+export const MAX_REPAIR_BYTES = 64 * 1024 * 1024;
+
+interface BlockRepair {
+  /** symbolId → payload (verified against its hash), oldest first. */
+  symbols: Map<number, Uint8Array>;
+  solving: boolean;
 }
 
 export interface FileSnapshot {
@@ -126,6 +144,10 @@ interface FileState {
   conflicts: number;
   rejectedChunks: number;
   lastActivity: number;
+  /** Source block size declared by repair packets (null until one arrives). */
+  repairBlockSize: number | null;
+  /** Buffered repair symbols per block (memory only: after a reload, new symbols are collected). */
+  repair: Map<number, BlockRepair>;
   /** Timing: wall-clock first chunk / verification, accumulated active ms, start of the running segment. */
   firstChunkAt: number | null;
   verifiedAt: number | null;
@@ -210,8 +232,9 @@ export class ReceiverEngine {
   /** Whether the receiver is actively scanning (drives per-file timing). */
   private receiving = true;
   private readonly _stats: ReceiverStats = {
-    packetsSeen: 0, accepted: 0, duplicates: 0, manifests: 0, rejected: 0, conflicts: 0, storageFailures: 0, rejectReasons: {},
+    packetsSeen: 0, accepted: 0, duplicates: 0, manifests: 0, rejected: 0, conflicts: 0, storageFailures: 0, repairSymbols: 0, recoveredChunks: 0, rejectReasons: {},
   };
+  private repairBytes = 0;
 
   constructor(opts: ReceiverOptions) {
     this.store = opts.store;
@@ -270,13 +293,16 @@ export class ReceiverEngine {
     let result: IngestResult;
     try {
       const packet = decodePacket(raw, this.limits);
-      result = packet.type === PacketType.Data ? await this.ingestData(packet) : this.ingestManifest(packet);
+      result =
+        packet.type === PacketType.Data ? await this.ingestData(packet)
+        : packet.type === PacketType.Repair ? await this.ingestRepair(packet)
+        : this.ingestManifest(packet);
     } catch (e) {
       if (!(e instanceof ProtocolError)) throw e;
       result = { status: 'rejected', reason: e.reason, detail: e.detail };
     }
     this.count(result);
-    if ((result.status === 'accepted' || result.status === 'manifest' || result.status === 'conflict')) this.changed(result.sessionId);
+    if (result.status === 'accepted' || result.status === 'manifest' || result.status === 'conflict' || (result.status === 'repair' && result.recovered > 0)) this.changed(result.sessionId);
     for (const l of this.listeners) l(result);
     return result;
   }
@@ -342,15 +368,167 @@ export class ReceiverEngine {
     if (file.bitmap.set(i)) {
       file.fingerprints[i] = fingerprint(p.chunkHash);
       file.storedBytes += p.payload.length;
-      if (file.firstChunkAt === null) {
-        // The file's clock starts at its first captured chunk.
-        file.firstChunkAt = at;
-        file.activeMs = 0;
-        file.clockMark = this.receiving ? at : null;
-      }
+      this.startClock(file, at);
+    }
+    // A new chunk may leave its block with enough repair symbols to rebuild the rest.
+    if (file.repairBlockSize !== null) {
+      const b = Math.floor(i / file.repairBlockSize);
+      if (file.repair.has(b)) await this.trySolve(file, b);
     }
     if (file.bitmap.complete && file.status === 'receiving') await this.verify(file);
     return { status: 'accepted', sessionId: sid, fileId: p.fileId, chunkIndex: i, fileStatus: file.status };
+  }
+
+  private startClock(file: FileState, at: number): void {
+    if (file.firstChunkAt !== null) return;
+    // The file's clock starts at its first captured chunk.
+    file.firstChunkAt = at;
+    file.activeMs = 0;
+    file.clockMark = this.receiving ? at : null;
+  }
+
+  // ── Repair packets (fountain code, PROTOCOL.md §5a) ──
+
+  private async ingestRepair(p: RepairPacket): Promise<IngestResult> {
+    const sid = toHex(p.sessionId);
+    const at = this.now();
+    let session = this.sessions.get(sid);
+    const dup: IngestResult = { status: 'duplicate', sessionId: sid, fileId: p.fileId };
+    if (session?.dismissed.has(p.fileId)) return dup;
+    let file = session?.files.get(p.fileId);
+    const { start, end } = blockRange(p.chunkCount, p.blockSize, p.blockIndex);
+
+    if (file) {
+      session!.lastActivity = at;
+      file.lastActivity = at;
+      const why = metadataMismatch(file, p) ?? (file.repairBlockSize !== null && file.repairBlockSize !== p.blockSize ? `repair block size ${p.blockSize} conflicts with ${file.repairBlockSize}` : null);
+      if (why) {
+        file.conflicts++;
+        return { status: 'conflict', sessionId: sid, fileId: p.fileId, detail: why };
+      }
+      if (file.status !== 'receiving') return dup;
+      // Nothing missing in this block, or this symbol is already held.
+      let missing = 0;
+      for (let i = start; i < end; i++) if (!file.bitmap.has(i)) missing++;
+      if (missing === 0 || file.repair.get(p.blockIndex)?.symbols.has(p.symbolId)) return dup;
+    } else if (session && session.declaredFileCount !== null && p.fileId >= session.declaredFileCount) {
+      return { status: 'conflict', sessionId: sid, fileId: p.fileId, detail: `file id ${p.fileId} not in manifest (${session.declaredFileCount} files)` };
+    }
+
+    // Verify before keeping anything, so a damaged symbol can never poison a solve.
+    if (!bytesEqual(sha256(p.payload), p.payloadHash)) {
+      if (file) file.rejectedChunks++;
+      throw new ProtocolError('repair-hash-mismatch', `file ${p.fileId} block ${p.blockIndex} symbol ${p.symbolId}`);
+    }
+    if (this.repairBytes + p.payload.length > MAX_REPAIR_BYTES) return dup;
+
+    if (!file) {
+      const created = !session;
+      session = this.sessionFor(sid);
+      session.lastActivity = at;
+      try {
+        file = this.createFile(session, p.fileId, p, at);
+      } catch (e) {
+        if (created) this.sessions.delete(sid);
+        throw e;
+      }
+    }
+    file.repairBlockSize = p.blockSize;
+    let block = file.repair.get(p.blockIndex);
+    if (!block) file.repair.set(p.blockIndex, (block = { symbols: new Map(), solving: false }));
+    let missing = 0;
+    for (let i = start; i < end; i++) if (!file.bitmap.has(i)) missing++;
+    // Keep at most missing + slack symbols: drop the oldest (an unlucky set that left the block unsolved).
+    while (block.symbols.size >= missing + REPAIR_SLACK) {
+      const [oldId, old] = block.symbols.entries().next().value!;
+      block.symbols.delete(oldId);
+      this.repairBytes -= old.length;
+    }
+    block.symbols.set(p.symbolId, p.payload.slice());
+    this.repairBytes += p.payload.length;
+    const recovered = await this.trySolve(file, p.blockIndex);
+    if (file.bitmap.complete && file.status === 'receiving') await this.verify(file);
+    return { status: 'repair', sessionId: sid, fileId: p.fileId, blockIndex: p.blockIndex, recovered, fileStatus: file.status };
+  }
+
+  /**
+   * Rebuild a block's missing chunks once its repair symbols determine them.
+   * Returns how many chunks were recovered (0 if not solvable yet).
+   */
+  private async trySolve(file: FileState, blockIndex: number): Promise<number> {
+    const block = file.repair.get(blockIndex);
+    const bs = file.repairBlockSize;
+    if (!block || bs === null || block.solving) return 0;
+    const { start, end } = blockRange(file.chunkCount, bs, blockIndex);
+    const unknown: number[] = [];
+    for (let i = start; i < end; i++) if (!file.bitmap.has(i)) unknown.push(i - start);
+    if (unknown.length === 0) {
+      this.dropBlock(file, blockIndex);
+      return 0;
+    }
+    if (block.symbols.size < unknown.length) return 0;
+    block.solving = true;
+    try {
+      const n = end - start;
+      const unknownSet = new Set(unknown);
+      const known = new Map<number, Uint8Array>();
+      for (let j = 0; j < n; j++) {
+        if (unknownSet.has(j)) continue;
+        const i = start + j;
+        const data = await this.store.get({ sessionId: file.sessionId, fileId: file.fileId, chunkIndex: i });
+        const len = chunkRange(file.fileSize, file.chunkSize, i).length;
+        if (!data || data.length !== len) {
+          // Evicted from storage: it is missing again, like at verification.
+          if (file.bitmap.clear(i)) file.storedBytes -= len;
+          return 0;
+        }
+        known.set(j, data);
+      }
+      const eqs = [...block.symbols].map(([id, payload]) => ({ coefs: coefficients(blockIndex, id, n), payload }));
+      const solved = solveBlock(n, unknown, eqs, (j) => known.get(j)!);
+      if (!solved) return 0;
+      let recovered = 0;
+      const at = this.now();
+      for (const [j, padded] of solved) {
+        const i = start + j;
+        const len = chunkRange(file.fileSize, file.chunkSize, i).length;
+        // Padding beyond a short last chunk must decode to zeros.
+        if (padded.subarray(len).some((x) => x !== 0)) {
+          file.conflicts++;
+          this.dropBlock(file, blockIndex);
+          return recovered;
+        }
+        if (file.bitmap.has(i)) continue; // arrived as a data packet meanwhile
+        const data = padded.slice(0, len);
+        await this.store.put({ sessionId: file.sessionId, fileId: file.fileId, chunkIndex: i }, data);
+        if (this.sessions.get(file.sessionId)?.files.get(file.fileId) !== file) return recovered;
+        if (file.bitmap.set(i)) {
+          file.fingerprints[i] = fingerprint(sha256(data));
+          file.storedBytes += len;
+          this.startClock(file, at);
+          recovered++;
+        }
+      }
+      this._stats.recoveredChunks += recovered;
+      this.dropBlock(file, blockIndex);
+      return recovered;
+    } catch {
+      // A failed write leaves the chunk missing; symbols are kept for the next attempt.
+      return 0;
+    } finally {
+      block.solving = false;
+    }
+  }
+
+  private releaseRepair(file: FileState): void {
+    for (const b of [...file.repair.keys()]) this.dropBlock(file, b);
+  }
+
+  private dropBlock(file: FileState, blockIndex: number): void {
+    const block = file.repair.get(blockIndex);
+    if (!block) return;
+    for (const v of block.symbols.values()) this.repairBytes -= v.length;
+    file.repair.delete(blockIndex);
   }
 
   // ── Manifest packets ──
@@ -433,7 +611,10 @@ export class ReceiverEngine {
       file.activeMs += Math.max(0, now - file.clockMark);
       file.clockMark = null;
     }
-    if (file.status === 'verified') file.verifiedAt = now;
+    if (file.status === 'verified') {
+      file.verifiedAt = now;
+      this.releaseRepair(file);
+    }
   }
 
   /**
@@ -464,6 +645,7 @@ export class ReceiverEngine {
     const session = this.sessions.get(sessionId);
     const f = session?.files.get(fileId);
     if (!session || !f) return;
+    this.releaseRepair(f);
     await this.store.deleteFile(sessionId, fileId);
     const fresh = this.newFileState(sessionId, fileId, f, this.now());
     fresh.name = f.name;
@@ -481,6 +663,7 @@ export class ReceiverEngine {
   async removeFile(sessionId: string, fileId: number): Promise<void> {
     const session = this.sessions.get(sessionId);
     if (!session || !session.files.has(fileId)) return;
+    this.releaseRepair(session.files.get(fileId)!);
     session.files.delete(fileId);
     session.dismissed.add(fileId);
     await this.store.deleteFile(sessionId, fileId);
@@ -488,7 +671,10 @@ export class ReceiverEngine {
   }
 
   async removeSession(sessionId: string): Promise<void> {
-    if (!this.sessions.delete(sessionId)) return;
+    const s = this.sessions.get(sessionId);
+    if (!s) return;
+    for (const f of s.files.values()) this.releaseRepair(f);
+    this.sessions.delete(sessionId);
     await this.store.deleteSession(sessionId);
     this.changed(sessionId);
   }
@@ -683,6 +869,8 @@ export class ReceiverEngine {
       bitmap: new ChunkBitmap(meta.chunkCount),
       fingerprints: new Uint32Array(meta.chunkCount),
       pending: new Set(),
+      repairBlockSize: null,
+      repair: new Map(),
       storedBytes: 0,
       status: 'receiving',
       hasManifest: false,
@@ -704,6 +892,7 @@ export class ReceiverEngine {
       case 'manifest': s.manifests++; break;
       case 'conflict': s.conflicts++; break;
       case 'storage-error': s.storageFailures++; break;
+      case 'repair': s.repairSymbols++; break;
       case 'rejected':
         s.rejected++;
         s.rejectReasons[r.reason] = (s.rejectReasons[r.reason] ?? 0) + 1;

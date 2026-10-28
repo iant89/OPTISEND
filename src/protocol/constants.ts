@@ -12,8 +12,11 @@ export const SUPPORTED_VERSIONS: readonly number[] = [1];
 export const PacketType = {
   Manifest: 0x01,
   Data: 0x02,
-  /** Reserved for forward error correction (spec §10). Rejected by v1 receivers. */
-  Parity: 0x03,
+  /**
+   * Fountain-code repair symbol (PROTOCOL.md §5a). Receivers from before it was
+   * defined reject it as an unsupported type and still read data packets.
+   */
+  Repair: 0x03,
 } as const;
 export type PacketType = (typeof PacketType)[keyof typeof PacketType];
 
@@ -42,6 +45,9 @@ export const COMMON_HEADER_BYTES = 18;
 
 /** Common header + fileId(2) fileSize(8) chunkSize(4) chunkCount(4) chunkIndex(4) startOffset(8) fileHash(32) chunkHash(32) + CRC(4). */
 export const DATA_HEADER_BYTES = COMMON_HEADER_BYTES + 2 + 8 + 4 + 4 + 4 + 8 + HASH_BYTES + HASH_BYTES + CRC_BYTES; // 116
+
+/** Common header + fileId(2) fileSize(8) chunkSize(4) chunkCount(4) blockIndex(4) blockSize(4) symbolId(4) fileHash(32) payloadHash(32) + CRC(4). */
+export const REPAIR_HEADER_BYTES = COMMON_HEADER_BYTES + 2 + 8 + 4 + 4 + 4 + 4 + 4 + HASH_BYTES + HASH_BYTES + CRC_BYTES; // 116
 
 /** Common header + partIndex(2) partCount(2) fileCount(2) entryCount(2), entries…, CRC(4). */
 export const MANIFEST_FIXED_BYTES = COMMON_HEADER_BYTES + 2 + 2 + 2 + 2 + CRC_BYTES; // 30

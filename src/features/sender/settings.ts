@@ -38,6 +38,11 @@ export interface SenderSettings {
   /** Show manifest frames for twice the interval. */
   holdManifest: boolean;
   colorLayers: ColorLayers;
+  /**
+   * From pass 2 on, send fountain-code repair symbols instead of repeating chunks
+   * (PROTOCOL.md §5a): any repair symbol of a block fills any missing chunk of it.
+   */
+  fountain: boolean;
 }
 
 /**
@@ -65,6 +70,7 @@ export const DEFAULT_SETTINGS: Readonly<SenderSettings> = Object.freeze({
   manifestEvery: 50,
   holdManifest: true,
   colorLayers: 1,
+  fountain: true,
 });
 
 export interface ResolvedQrConfig {
@@ -169,6 +175,7 @@ export function sanitizeSettings(raw: unknown): SenderSettings {
     manifestEvery: isInt(r.manifestEvery, 0, 100_000) ? (r.manifestEvery as number) : d.manifestEvery,
     holdManifest: typeof r.holdManifest === 'boolean' ? r.holdManifest : d.holdManifest,
     colorLayers: r.colorLayers === 3 ? 3 : 1,
+    fountain: typeof r.fountain === 'boolean' ? r.fountain : d.fountain,
   };
 }
 

@@ -50,16 +50,24 @@ export function maskOffsetForPass(pass: number): number {
 export class FrameRenderer {
   private readonly cache = new Map<string, Promise<QrMatrix>>();
 
+  /** `fountain`: data frames of pass 2 onwards carry repair symbols (TransferPlan.packet). */
   constructor(
     private readonly plan: TransferPlan,
     private readonly cfg: ResolvedQrConfig,
     private readonly encoder: QrEncoderClient,
     private readonly capacity = 16,
+    private readonly fountain = false,
   ) {}
+
+  /** Cache key: repair frames differ every pass; other frames only by mask. */
+  private key(ref: PacketRef, pass: number): string {
+    const repair = this.fountain && pass >= 2 && ref.kind === 'data';
+    return `${refKey(ref)}@${maskOffsetForPass(pass)}${repair ? `#${pass}` : ''}`;
+  }
 
   get(ref: PacketRef, pass = 1): Promise<QrMatrix> {
     const offset = maskOffsetForPass(pass);
-    const key = `${refKey(ref)}@${offset}`;
+    const key = this.key(ref, pass);
     const hit = this.cache.get(key);
     if (hit) {
       // Refresh LRU position.
@@ -67,7 +75,7 @@ export class FrameRenderer {
       this.cache.set(key, hit);
       return hit;
     }
-    const p = this.plan.packet(ref).then((packet) =>
+    const p = this.plan.packet(ref, pass, this.fountain).then((packet) =>
       // Data frames always fit cfg.version exactly; an oversized manifest part gets a larger version.
       this.encoder.encode(frameForQr(packet, this.cfg.transport), this.cfg.ecc, this.cfg.version, offset),
     );
@@ -88,6 +96,6 @@ export class FrameRenderer {
 
   /** Synchronously check whether every code of a frame is already rendered. */
   has(group: readonly PacketRef[], pass = 1): boolean {
-    return group.every((ref) => this.cache.has(`${refKey(ref)}@${maskOffsetForPass(pass)}`));
+    return group.every((ref) => this.cache.has(this.key(ref, pass)));
   }
 }

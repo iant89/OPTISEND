@@ -113,7 +113,7 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
 
   // ── Feedback: subtle flash for new chunks, announcement + optional vibration for completed files ──
   useEffect(() => engine.subscribe((r) => {
-    if (r.status === 'accepted') {
+    if (r.status === 'accepted' || (r.status === 'repair' && r.recovered > 0)) {
       setFlash((n) => n + 1);
       if (r.fileStatus === 'verified') {
         const f = engine.snapshot().find((s) => s.sessionId === r.sessionId)?.files.find((x) => x.fileId === r.fileId);
@@ -201,6 +201,7 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
           <div><dt>Missing</dt><dd>{active ? missing.toLocaleString() : '—'}</dd></div>
           <div><dt>Duplicates</dt><dd>{st.duplicates.toLocaleString()}</dd></div>
           <div><dt>Invalid</dt><dd>{(st.rejected + st.conflicts).toLocaleString()}</dd></div>
+          {st.recoveredChunks > 0 && <div><dt>Rebuilt</dt><dd title="Chunks rebuilt from repair codes (fountain coding)">{st.recoveredChunks.toLocaleString()}</dd></div>}
         </dl>
 
         <div className="transmit-controls">
