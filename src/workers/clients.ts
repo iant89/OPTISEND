@@ -41,11 +41,11 @@ export class QrEncoderClient {
     return this.worker !== null;
   }
 
-  encode(content: QrContent, ecc: EccLevel, minVersion: number): Promise<QrMatrix> {
-    if (!this.worker) return Promise.resolve().then(() => encodeQr(content, { ecc, minVersion }));
+  encode(content: QrContent, ecc: EccLevel, minVersion: number, maskOffset = 0): Promise<QrMatrix> {
+    if (!this.worker) return Promise.resolve().then(() => encodeQr(content, { ecc, minVersion, maskOffset }));
     const id = nextId++;
     return new Promise((resolve, reject) => {
-      const req: QrRequest = { id, content, ecc, minVersion };
+      const req: QrRequest = { id, content, ecc, minVersion, maskOffset };
       this.pending.set(id, { resolve, reject, req });
       this.worker!.postMessage(req);
     });
@@ -58,7 +58,7 @@ export class QrEncoderClient {
     for (const [id, p] of this.pending) {
       this.pending.delete(id);
       try {
-        p.resolve(encodeQr(p.req.content, { ecc: p.req.ecc, minVersion: p.req.minVersion }));
+        p.resolve(encodeQr(p.req.content, { ecc: p.req.ecc, minVersion: p.req.minVersion, ...(p.req.maskOffset ? { maskOffset: p.req.maskOffset } : {}) }));
       } catch (e) {
         p.reject(e instanceof Error ? e : new Error(String(e)));
       }

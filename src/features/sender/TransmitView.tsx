@@ -77,14 +77,14 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
       setSegVersion((v) => v + 1);
 
       const token = ++drawToken.current;
-      const ready = renderer.has(e.frame);
+      const ready = renderer.has(e.frame, e.pass);
       const t0 = performance.now();
-      renderer.get(e.frame).then((m) => {
+      renderer.get(e.frame, e.pass).then((m) => {
         if (token !== drawToken.current) return; // a newer frame superseded this one
         if (!ready && performance.now() - t0 > 50) lateFrames.current++;
         setMatrix(m);
       }, () => { lateFrames.current++; });
-      renderer.prefetch(scheduler.peek(PREFETCH));
+      renderer.prefetch(scheduler.peekWithPass(PREFETCH));
     });
     const offState = scheduler.onState((s) => {
       setState(s);
@@ -93,7 +93,7 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
       else if (s === 'finished') setAnnounce('All passes broadcast');
       else if (s === 'stopped') setAnnounce('Transmission stopped');
     });
-    renderer.prefetch(frames.slice(0, PREFETCH + 1));
+    renderer.prefetch(frames.slice(0, PREFETCH + 1).map((frame) => ({ frame, pass: 1 })));
     // Give the first frame a moment to render before the clock starts.
     void renderer.get(frames[0]!).finally(() => scheduler.start());
     return () => {

@@ -36,6 +36,12 @@ export interface EncodeOptions {
   maxVersion?: number;
   /** Force a mask pattern 0–7; default chooses the lowest-penalty mask. */
   mask?: number;
+  /**
+   * Rotate away from the automatically chosen mask by this many steps (mod 8).
+   * The sender uses a different mask on each pass so a code that one decoder
+   * cannot read at a given camera angle looks different on the next pass.
+   */
+  maskOffset?: number;
 }
 
 export class QrCapacityError extends Error {
@@ -82,6 +88,7 @@ export function encodeQr(content: QrContent, opts: EncodeOptions): QrMatrix {
       if (p < best) { best = p; mask = m; }
       qr.applyMask(m); // XOR undo
     }
+    if (opts.maskOffset) mask = (((mask + opts.maskOffset) % 8) + 8) % 8;
   }
   qr.applyMask(mask);
   qr.drawFormatBits(ecc, mask);

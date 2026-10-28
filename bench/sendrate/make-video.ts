@@ -3,13 +3,14 @@
  * blend, vsync-quantized sender switches, sensor noise) as a Y4M video for
  * Chromium's fake webcam. Three passes, each seen from the simulator's next hand
  * pose (as in sim.ts); Chromium loops the file.
- * Usage: npx tsx bench/sendrate/make-video.ts <seed> <intervalMs> <out.y4m>
+ * Usage: npx tsx bench/sendrate/make-video.ts <seed> <intervalMs> <out.y4m> [--rotate]
+ *   --rotate: the sender rotates the QR mask each pass (as the app now does).
  */
 import { openSync, writeSync, closeSync } from 'node:fs';
 import { prepare } from './sim.ts';
 
 const [seed, intervalMs, out] = [Number(process.argv[2]), Number(process.argv[3]), process.argv[4]!];
-const p = await prepare(seed);
+const p = await prepare(seed, 40, 1280, 720, process.argv.includes('--rotate'));
 const fps = 30, readout = 20, exposure = 12, sigma = 5, VSYNC = 1000 / 60;
 let st = seed * 31 + intervalMs;
 const rnd = () => ((st = (st * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff);

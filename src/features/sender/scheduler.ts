@@ -121,6 +121,17 @@ export class TransmissionScheduler<T> {
     return out;
   }
 
+  /** Like peek(), with the pass number each upcoming frame will be shown in. */
+  peekWithPass(count: number): { frame: T; pass: number }[] {
+    const out: { frame: T; pass: number }[] = [];
+    const n = this.frames.length;
+    for (let k = 1; k <= count && k < n; k++) {
+      const i = this.index + k;
+      out.push({ frame: this.frames[i % n]!, pass: this.pass + Math.floor(i / n) });
+    }
+    return out;
+  }
+
   /** Estimated duration of one pass in ms at the current interval. */
   passDurationMs(): number {
     return this.frames.reduce((n, f) => n + this.durationOf(f), 0);

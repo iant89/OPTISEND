@@ -32,7 +32,8 @@ export interface SenderSettings {
   holdManifest: boolean;
 }
 
-export const INTERVAL_CHOICES = [500, 750, 1000, 1500] as const;
+/** 200 ms is the default: the send-rate benchmark (status/sendrate-benchmark.md) found it ~3× faster than 750 ms with similar reliability. */
+export const INTERVAL_CHOICES = [200, 300, 500, 750, 1000, 1500] as const;
 export const PASS_CHOICES: readonly PassCount[] = [1, 2, 3, 5, 'continuous'];
 
 export const DEFAULT_SETTINGS: Readonly<SenderSettings> = Object.freeze({
@@ -43,7 +44,7 @@ export const DEFAULT_SETTINGS: Readonly<SenderSettings> = Object.freeze({
   // Text-safe by default: works with every scanner, including text-only ones
   // (BarcodeDetector, OS camera apps) that corrupt binary byte-mode content.
   transport: 'alphanumeric',
-  intervalMs: 750,
+  intervalMs: 200,
   passes: 'continuous',
   strategy: 'sequential',
   manifestEvery: 50,
@@ -155,4 +156,13 @@ function isInt(v: unknown, min: number, max: number): boolean {
 
 function clampInt(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(Number.isFinite(v) ? v : min)));
+}
+
+/**
+ * Settings saved before the 200 ms default: keep the user's other choices, but an
+ * interval equal to the old 750 ms default moves to the new default.
+ */
+export function migrateLegacySettings(raw: unknown): SenderSettings {
+  const s = sanitizeSettings(raw);
+  return s.intervalMs === 750 ? { ...s, intervalMs: DEFAULT_SETTINGS.intervalMs } : s;
 }

@@ -113,6 +113,26 @@ const eq = (a: Uint8Array, b: Uint8Array) => a.length === b.length && a.every((v
     return { status: f.status, ok: f.status === 'verified' ? eq(await readAll(st, sid), data) : false };
   },
 
+  /** Chunks stored for a transfer whose record was never saved are reclaimed on open. */
+  async orphanCleanup(dbName: string) {
+    const db = await openDatabase(dbName);
+    const chunks = new IdbChunkStore(db);
+    await chunks.put({ sessionId: 'deadbeefdeadbeef', fileId: 0, chunkIndex: 0 }, bytes(300, 1));
+    await chunks.put({ sessionId: 'deadbeefdeadbeef', fileId: 0, chunkIndex: 1 }, bytes(200, 2));
+    db.close();
+    const st = await ReceiverStorage.open({ dbName, debounceMs: 50 });
+    const reclaimed = st.restoreReport?.orphanBytesReclaimed ?? -1;
+    const left = (await st.usageBySession()).get('deadbeefdeadbeef') ?? 0;
+    // A brand-new transfer is saved at once (no debounce window).
+    const { out } = await packets(600, 12);
+    await st.engine.ingest(out[1]!);
+    await new Promise((r) => setTimeout(r, 30)); // far less than the 50 ms debounce
+    const db2 = await openDatabase(dbName);
+    const savedNow = (await new IdbSessionStore(db2).loadAll()).length;
+    db2.close();
+    return { reclaimed, left, savedNow };
+  },
+
   async sessionStoreRaw(dbName: string) {
     const db = await openDatabase(dbName);
     const all = await new IdbSessionStore(db).loadAll();

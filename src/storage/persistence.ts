@@ -29,6 +29,8 @@ export interface StorageStatus {
 
 export class ReceiverStorage {
   private dirty = new Set<string>();
+  /** Session ids known to have a saved record. */
+  private readonly saved = new Set<string>();
   private timer: ReturnType<typeof setTimeout> | null = null;
   private saving: Promise<void> = Promise.resolve();
   private readonly status: StorageStatus;
@@ -39,7 +41,7 @@ export class ReceiverStorage {
   private constructor(
     readonly engine: ReceiverEngine,
     private readonly sessions: IdbSessionStore | null,
-    readonly restoreReport: RestoreReport | null,
+    readonly restoreReport: (RestoreReport & { orphanBytesReclaimed?: number }) | null,
     reason: string | null,
     private readonly debounceMs: number,
   ) {
@@ -60,8 +62,14 @@ export class ReceiverStorage {
       const sessions = new IdbSessionStore(db);
       const engine = new ReceiverEngine({ store: chunks, ...(opts.limits ? { limits: opts.limits } : {}) });
       engine.setReceiving(false); // file clocks run only while the receive screen is scanning
-      const report = await engine.restore(await sessions.loadAll());
-      return new ReceiverStorage(engine, sessions, report, null, debounceMs);
+      const saved = await sessions.loadAll();
+      // Chunks with no saved transfer record (page closed before the first save) can't be
+      // reattached — reclaim their space.
+      const orphanBytes = await sessions.deleteOrphanChunks(new Set(saved.map((x) => x.id))).catch(() => 0);
+      const report = await engine.restore(saved);
+      const st = new ReceiverStorage(engine, sessions, { ...report, orphanBytesReclaimed: orphanBytes }, null, debounceMs);
+      for (const x of saved) st.saved.add(x.id);
+      return st;
     } catch (e) {
       const store: ChunkStore = new MemoryChunkStore();
       const engine = new ReceiverEngine({ store, ...(opts.limits ? { limits: opts.limits } : {}) });
@@ -78,6 +86,12 @@ export class ReceiverStorage {
   private markDirty(sessionId: string): void {
     if (!this.sessions) return;
     this.dirty.add(sessionId);
+    // A transfer that has never been saved is saved immediately: until its record exists,
+    // its stored chunks could not be reattached after a reload.
+    if (!this.saved.has(sessionId)) {
+      void this.flush();
+      return;
+    }
     if (this.timer === null) this.timer = setTimeout(() => void this.flush(), this.debounceMs);
   }
 
@@ -98,6 +112,8 @@ export class ReceiverStorage {
       }
       try {
         await store.save(save, del);
+        for (const x of save) this.saved.add(x.id);
+        for (const id of del) this.saved.delete(id);
         this.status.lastSaveError = null;
       } catch (e) {
         this.status.saveFailures++;

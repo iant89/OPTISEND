@@ -8,7 +8,7 @@ export type HashResponse =
   | { id: number; kind: 'done'; hash: Uint8Array }
   | { id: number; kind: 'error'; message: string };
 
-export type QrRequest = { id: number; content: QrContent; ecc: EccLevel; minVersion: number };
+export type QrRequest = { id: number; content: QrContent; ecc: EccLevel; minVersion: number; maskOffset?: number };
 export type QrResponse =
   | { id: number; kind: 'done'; version: number; mask: number; size: number; modules: Uint8Array; ecc: EccLevel }
   | { id: number; kind: 'error'; message: string };

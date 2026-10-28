@@ -11,8 +11,10 @@ import { ProtocolError } from '../../protocol/errors.ts';
 import { scanRegion, targetScanSide, type ScanRegion } from './region.ts';
 
 export interface ScannerOptions {
-  /** Upper bound on decode attempts per second. */
+  /** Average upper bound on decode attempts per second. */
   maxFps?: number;
+  /** Random source for scan-timing jitter (tests). */
+  random?: () => number;
   /** Fraction of the video's shorter side covered by the scan square. */
   regionFraction?: number;
 }
@@ -49,6 +51,20 @@ export function acceptHit(hit: ScanHit): Uint8Array | null {
   }
 }
 
+/** ±25% random jitter on the gap between scan attempts. */
+export const SCAN_JITTER = 0.25;
+
+/**
+ * Minimum gap before the next scan attempt: the nominal 1000/maxFps randomised by
+ * ±SCAN_JITTER (mean unchanged). Without jitter, a 30 fps camera, a 12 scans/s cap
+ * and a sender interval like 100 ms lock in phase, so every scan can land on the
+ * same moment of each code — including the torn frame at a code change
+ * (status/sendrate-benchmark.md).
+ */
+export function nextScanGap(maxFps: number, random: () => number = Math.random): number {
+  return (1000 / maxFps) * (1 - SCAN_JITTER + 2 * SCAN_JITTER * random());
+}
+
 type VideoWithRvfc = HTMLVideoElement & { requestVideoFrameCallback?: (cb: () => void) => number; cancelVideoFrameCallback?: (h: number) => void };
 
 export class FrameScanner {
@@ -56,6 +72,8 @@ export class FrameScanner {
   private busy = false;
   private handle: number | null = null;
   private lastAttempt = 0;
+  private gap: number;
+  private readonly random: () => number;
   private readonly canvas: HTMLCanvasElement | OffscreenCanvas;
   private readonly ctx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   private readonly recent: number[] = [];
@@ -75,6 +93,8 @@ export class FrameScanner {
   ) {
     this.maxFps = opts.maxFps ?? 12;
     this.fraction = opts.regionFraction ?? 0.85;
+    this.random = opts.random ?? Math.random;
+    this.gap = nextScanGap(this.maxFps, this.random);
     this.canvas = typeof OffscreenCanvas !== 'undefined' ? new OffscreenCanvas(1, 1) : document.createElement('canvas');
     const ctx = this.canvas.getContext('2d', { willReadFrequently: true }) as CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D | null;
     if (!ctx) throw new Error('2D canvas unavailable');
@@ -117,8 +137,9 @@ export class FrameScanner {
     this.handle = null;
     if (!this.running) return;
     const now = performance.now();
-    if (!this.busy && now - this.lastAttempt >= 1000 / this.maxFps && this.video.readyState >= 2 && this.video.videoWidth > 0) {
+    if (!this.busy && now - this.lastAttempt >= this.gap && this.video.readyState >= 2 && this.video.videoWidth > 0) {
       this.lastAttempt = now;
+      this.gap = nextScanGap(this.maxFps, this.random);
       void this.scanOnce(now);
     }
     this.schedule();

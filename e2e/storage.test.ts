@@ -50,7 +50,7 @@ test('a real page reload mid-transfer resumes exactly where it left off', async 
   await page.reload();
   await page.waitForFunction(() => 'harness' in window);
   const b = await call<any>(page, 'resumeAfterReload', db);
-  assert.deepEqual(b.report, { sessions: 1, files: 1, lostChunks: 0, recoveredChunks: 0, discarded: 0 });
+  assert.deepEqual(b.report, { sessions: 1, files: 1, lostChunks: 0, recoveredChunks: 0, discarded: 0, orphanBytesReclaimed: 0 });
   assert.equal(b.beforeReceived, 5, 'progress restored before any new packet');
   assert.equal(b.beforeName, 'file-9.bin', 'manifest metadata restored');
   assert.equal(b.duplicates, 6, 'already-stored chunks (and manifest) are not counted twice');
@@ -85,5 +85,12 @@ test('storage quota exhaustion: writes fail cleanly, nothing is miscounted, and 
   await page.waitForFunction(() => 'harness' in window);
   const s = await call<any>(page, 'quotaRetry', db);
   assert.deepEqual(s, { status: 'verified', ok: true });
+  await page.close();
+});
+
+test('orphaned chunks are reclaimed on open; a new transfer is saved immediately', async () => {
+  const page = await open();
+  const r = await call<any>(page, 'orphanCleanup', 'optisend-test-orphans');
+  assert.deepEqual(r, { reclaimed: 500, left: 0, savedNow: 1 });
   await page.close();
 });

@@ -214,3 +214,26 @@ test('accessibility basics: names, focus, touch targets, no horizontal scroll', 
   assert.ok(focused && focused !== 'BODY');
   await page.close();
 });
+
+test('the sender rotates the QR mask each pass: same packet, different pattern, identical bytes', { timeout: 120_000 }, async () => {
+  const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
+  await page.goto(server.url);
+  await page.getByRole('button', { name: /Send files/ }).click();
+  await page.setInputFiles('#file-input', [{ name: 'm.bin', mimeType: '', buffer: bytes(900, 5) }]);
+  await page.getByText('500 ms').click(); // slow enough to capture every frame reliably
+  await page.getByText('2×').click();
+  await page.getByText('Ready to transmit.').waitFor();
+  await page.getByRole('button', { name: 'Start transfer' }).click();
+  const frames = await captureFrames(page);
+  await page.close();
+  const byPacket = new Map<string, number[]>();
+  for (const f of frames) {
+    const { mask, content } = readPixelPerfectQr(f.n, Uint8Array.from(f.bits, (c) => (c === '1' ? 1 : 0)));
+    const pkt = typeof content === 'string' ? unframeScan({ text: content }) : unframeScan({ bytes: content });
+    const key = Buffer.from(pkt!).toString('hex');
+    byPacket.set(key, [...(byPacket.get(key) ?? []), mask]);
+  }
+  const seenTwice = [...byPacket.values()].filter((m) => m.length >= 2);
+  assert.ok(seenTwice.length >= 3, `packets captured in both passes: ${seenTwice.length}`);
+  for (const masks of seenTwice) assert.equal(masks[1], (masks[0]! + 3) % 8, `pass 2 mask = pass 1 mask + 3: ${masks}`);
+});

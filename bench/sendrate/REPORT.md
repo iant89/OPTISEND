@@ -114,3 +114,26 @@ The real app scanned at 10–10.5 scans/s with about 30 ms per decode (simulator
 
 ## Caveats
 Simulated camera: 720p, 30 fps, mild hand jitter, no autofocus hunting or motion blur. Real phones capture at 1080p, which helps, and some at 60 fps, which helps more. Real-device testing is still required before changing defaults.
+
+## After tuning (implemented)
+
+These are now in the app:
+- 200 ms default interval.
+- QR mask rotated every pass. Pass 1 uses the automatic mask; each later pass is +3 mod 8, so 8 passes cover all masks.
+- ±25% random jitter on the scanner's gap between scans.
+
+Simulator results: 12 scans/s cap, three camera poses (seed 2 is the awkward angle).
+
+| Per code | Before: seed 1 / 2 / 3 (this machine) | After: seed 1 / 2 / 3 (this machine) | After, 3× slower device |
+|---|---|---|---|
+| 300 ms | 15.0 s / ✗ / 12.4 s | 15.1 s / 24.6 s / 18.4 s | 12.4 s / 37.0 s / 18.4 s |
+| 250 ms | 13.8 s / ✗ / 15.3 s | 12.6 s / 20.4 s / 20.1 s | 10.4 s / 20.4 s / 20.1 s |
+| **200 ms** | **10.0 s / ✗ / 16.2 s** | **11.2 s / 16.3 s / 12.3 s** | **11.2 s / 16.3 s / 12.3 s** |
+| 150 ms | 9.9 s / ✗ / 18.4 s | 8.4 s / 12.2 s / 12.1 s | 7.6 s / 18.6 s / 12.1 s |
+| 100 ms | 17.6 s / ✗ / ✗ | 8.3 s / 12.2 s / 6.7 s | 8.3 s / 12.4 s / 11.2 s |
+
+- **Every run now completes: 30 of 30, against 19 of 30 before.** At the awkward angle the file used to never finish at any speed; now it finishes in 12–37 s.
+- **Jitter removed the 100 ms aliasing.** Seed 1 went from 4.2 passes (17.6 s) to 2 passes (8.3 s).
+- **Individual times move by ±1–5 s from run to run,** because jitter and mask choice change which frames land. The worst case is what improved.
+
+Real app check with the new code (Chromium fake webcam, awkward angle, 200 ms per code): **received in 16 s** (simulator: 16.3 s). Before the change this configuration never completed.

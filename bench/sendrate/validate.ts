@@ -2,7 +2,7 @@
  * Run the REAL receiver app (built dist/) in Chromium with the simulator's camera as its
  * webcam, and read back the app's own per-file timing. Compare with sim.ts for the
  * same seed and interval (fixed masks, 12 scans/s cap, device factor 1).
- * Usage: npx tsx bench/sendrate/validate.ts <seed> <intervalMs...>
+ * Usage: npx tsx bench/sendrate/validate.ts <seed> <intervalMs...> [--rotate]
  */
 import { mkdtempSync, rmSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -14,10 +14,11 @@ import { fakeCameraArgs } from '../../e2e/camera-video.ts';
 
 const seed = Number(process.argv[2]);
 const server = await serveDist();
-for (const interval of process.argv.slice(3).map(Number)) {
+const rotate = process.argv.includes('--rotate');
+for (const interval of process.argv.slice(3).filter((a) => !a.startsWith('--')).map(Number)) {
   const dir = mkdtempSync(join(tmpdir(), 'validate-'));
   const video = join(dir, 'cam.y4m');
-  const mk = spawnSync('npx', ['tsx', 'bench/sendrate/make-video.ts', String(seed), String(interval), video], { encoding: 'utf8' });
+  const mk = spawnSync('npx', ['tsx', 'bench/sendrate/make-video.ts', String(seed), String(interval), video, ...(rotate ? ['--rotate'] : [])], { encoding: 'utf8' });
   if (mk.status !== 0) throw new Error(mk.stderr);
   const browser = await chromium.launch({ args: fakeCameraArgs(video) });
   try {
@@ -30,7 +31,7 @@ for (const interval of process.argv.slice(3).map(Number)) {
     const speed = await page.locator('.speed-final').first().innerText();
     await page.locator('details.advanced summary').click();
     const diag = (await page.locator('details.advanced p.small').first().innerText()).replace(/\s+/g, ' ');
-    console.log(`REAL APP seed ${seed} ${interval} ms: ${speed} | wall ${wall.toFixed(1)} s from opening the camera | ${diag} | video ${(statSync(video).size / 1e6).toFixed(0)} MB`);
+    console.log(`REAL APP seed ${seed} ${interval} ms${rotate ? ' (rotating masks)' : ''}: ${speed} | wall ${wall.toFixed(1)} s from opening the camera | ${diag} | video ${(statSync(video).size / 1e6).toFixed(0)} MB`);
   } finally {
     await browser.close();
     rmSync(dir, { recursive: true, force: true });

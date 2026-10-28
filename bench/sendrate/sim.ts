@@ -26,7 +26,7 @@ import { bytesSource } from '../../src/protocol/source.ts';
 import { frameForQr } from '../../src/protocol/transport.ts';
 import { encodeQr } from '../../src/qr/encoder.ts';
 import { decodeWithJsQr } from '../../src/qr/decoders/jsqr-core.ts';
-import { acceptHit } from '../../src/features/receiver/scanner.ts';
+import { acceptHit, nextScanGap } from '../../src/features/receiver/scanner.ts';
 import { scanRegion, targetScanSide } from '../../src/features/receiver/region.ts';
 import { DEFAULT_SETTINGS, resolveQrConfig } from '../../src/features/sender/settings.ts';
 
@@ -39,11 +39,14 @@ export interface SimConfig {
   exposureMs?: number;
   noiseSigma?: number;
   maxPasses?: number;
+  /** Randomise the scanner's gap ±25% like FrameScanner (nextScanGap). */
+  jitter?: boolean;
   seed: number;
 }
 
 export interface SimResult {
   masks: 'fixed' | 'rotating';
+  jitter: boolean;
   intervalMs: number;
   maxFps: number;
   deviceFactor: number;
@@ -172,13 +175,15 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
   const capturedFirstPass = new Set<number>();
   let scans = 0, torn = 0, decodeTotal = 0, completeMs: number | null = null;
   let busyUntil = 0, lastAttempt = -Infinity;
+  const nextGap = () => (c.jitter ? nextScanGap(c.maxFps, rnd) : 1000 / c.maxFps);
+  let gap = nextGap();
   const phase = rnd() * camPeriod;
   const sigma16 = sigma; // noise table values are N(0,1)×16 → scale by sigma/16 using integer math below
 
   for (let j = 0; ; j++) {
     const tf = phase + j * camPeriod + (rnd() - 0.5) * 2;
     if (tf > maxPasses * passMs) break;
-    if (tf < busyUntil || tf - lastAttempt < 1000 / c.maxFps) continue;
+    if (tf < busyUntil || tf - lastAttempt < gap) continue;
 
     // Compose the cropped frame with rolling shutter + exposure blending.
     const { sx, sy, sSize, dSize } = regions[regionMode]!;
@@ -227,6 +232,7 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
     decodeTotal += decodeMs;
     scans++;
     lastAttempt = tf;
+    gap = nextGap();
     busyUntil = tf + decodeMs;
     const pkt = hit ? acceptHit(hit) : null;
     if (pkt || hit) missesInMode = 0;
@@ -243,6 +249,7 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
   const payload = p.fileSize;
   return {
     masks,
+    jitter: !!c.jitter,
     intervalMs: I, maxFps: c.maxFps, deviceFactor: c.deviceFactor, seed: c.seed,
     dataCodes: dataIdx.size,
     passMs,
@@ -260,12 +267,25 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
 // ── CLI: sweep ──
 if (import.meta.url === `file://${process.argv[1]}`) {
   const quick = process.argv.includes('--quick');
+  const tuned = process.argv.includes('--tuned'); // new defaults: rotating masks + scan jitter
   const intervals = quick ? [750, 250] : [1000, 750, 500, 400, 300, 250, 200, 150, 100];
   const caps = quick ? [12] : [12, 30];
   const factors = quick ? [1] : [1, 3];
   const seedArg = process.argv.indexOf('--seed');
   const seeds = seedArg > 0 ? [Number(process.argv[seedArg + 1])] : quick ? [1] : [1, 2, 3];
   const results: SimResult[] = [];
+  if (tuned) {
+    for (const seed of seeds) {
+      const prep = await prepare(seed, 40, 1280, 720, true);
+      for (const deviceFactor of [1, 3]) for (const intervalMs of [300, 250, 200, 150, 100]) {
+        const r = await simulate(prep, { intervalMs, maxFps: 12, deviceFactor, seed, jitter: true }, 'rotating');
+        results.push(r);
+        process.stderr.write(`seed ${seed} tuned ×${deviceFactor} ${intervalMs} ms → first pass ${(r.firstPassCoverage * 100).toFixed(0)}%, done ${r.completeMs === null ? '—' : (r.completeMs / 1000).toFixed(1) + ' s'} (${r.passesNeeded?.toFixed(2) ?? '—'} passes), torn ${r.tornFrames}/${r.scans}\n`);
+      }
+    }
+    writeFileSync(`bench/sendrate/tuned-seed${seeds[0]}.json`, JSON.stringify(results, null, 1));
+    process.exit(0);
+  }
   for (const seed of seeds) {
     for (const masks of ['fixed', 'rotating'] as const) {
       const prep = await prepare(seed, 40, 1280, 720, masks === 'rotating');

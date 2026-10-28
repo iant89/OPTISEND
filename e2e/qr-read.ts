@@ -8,7 +8,7 @@
 import { ECC_CODEWORDS_PER_BLOCK, NUM_ECC_BLOCKS, rawDataModules, type EccLevel } from '../src/qr/capacity.ts';
 import { dataModuleIndices, formatBits, maskInverts, rsDivisor, rsRemainder } from '../src/qr/encoder.ts';
 
-export function readPixelPerfectQr(size: number, modules: Uint8Array): { version: number; ecc: EccLevel; content: Uint8Array | string } {
+export function readPixelPerfectQr(size: number, modules: Uint8Array): { version: number; ecc: EccLevel; mask: number; content: Uint8Array | string } {
   const version = (size - 17) / 4;
   if (!Number.isInteger(version) || version < 1 || version > 40) throw new Error(`bad size ${size}`);
   const at = (x: number, y: number) => modules[y * size + x]!;
@@ -59,7 +59,7 @@ export function readPixelPerfectQr(size: number, modules: Uint8Array): { version
     const len = read(version <= 9 ? 8 : 16);
     const out = new Uint8Array(len);
     for (let i = 0; i < len; i++) out[i] = read(8);
-    return { version, ecc, content: out };
+    return { version, ecc, mask, content: out };
   }
   if (mode === 0b0010) {
     const A = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ $%*+-./:';
@@ -67,7 +67,7 @@ export function readPixelPerfectQr(size: number, modules: Uint8Array): { version
     let s = '';
     for (let i = 0; i + 1 < len; i += 2) { const v = read(11); s += A[Math.floor(v / 45)]! + A[v % 45]!; }
     if (len % 2) s += A[read(6)]!;
-    return { version, ecc, content: s };
+    return { version, ecc, mask, content: s };
   }
   throw new Error(`unsupported mode ${mode}`);
 }

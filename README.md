@@ -16,8 +16,8 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 133 unit tests (node:test via tsx)
-npm run test:e2e     # 13 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
+npm test             # 139 unit tests (node:test via tsx)
+npm run test:e2e     # 15 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
 
@@ -93,6 +93,14 @@ Each file's clock starts when its **first chunk is captured** and stops when the
 - Once verified: "Received in 1m 03s · 412 B/s", using file size ÷ active time.
 - Files that fit in a single capture (or are empty) show "Received instantly" instead of a meaningless rate. Failed files show no rate.
 - The clock starts at the *capture* of the first chunk, so the first chunk's own display time isn't counted. This slightly overstates the rate for files of only a few chunks and is negligible for larger ones.
+
+### Send-rate tuning (from `bench/sendrate/REPORT.md`)
+- **200 ms per code by default:** about 3× faster than the old 750 ms with similar reliability, validated in the real app. Saved settings that still held the old 750 ms default move to 200 ms; other saved choices are kept.
+- **QR mask rotates every pass:** `maskOffsetForPass`. Same packet, different module pattern, so a code that's unreadable at a given camera angle becomes readable on the next pass. Receivers need no change.
+- **Scanner gap jitter of ±25%:** `nextScanGap`. Stops the camera, the scan cap and the sender interval locking in phase on torn frames.
+- **Storage hardening found along the way:**
+  - A new transfer's record is saved immediately rather than after the 400 ms debounce, so its chunks can always be reattached after a reload.
+  - Chunks with no saved record are reclaimed when the app opens.
 
 ### Default transport is text-safe (Base45)
 The browser e2e test showed that desktop QR decoders return byte-mode content as *text* and cut it off at the first zero byte, so every binary frame was rejected (safely, by CRC/length checks). `BarcodeDetector.rawValue` and phone camera apps are text-only too. Text-safe mode works with any scanner and costs about 3% capacity. Binary mode stays available for receivers that read raw bytes.

@@ -5,7 +5,7 @@ import { Home } from './Home.tsx';
 import type { TransferPlan } from '../protocol/sender.ts';
 import { SendScreen, type QueuedFile } from '../features/sender/SendScreen.tsx';
 import { TransmitView, type TransmissionSummary } from '../features/sender/TransmitView.tsx';
-import { DEFAULT_SETTINGS, sanitizeSettings, type ResolvedQrConfig, type SenderSettings } from '../features/sender/settings.ts';
+import { DEFAULT_SETTINGS, migrateLegacySettings, sanitizeSettings, type ResolvedQrConfig, type SenderSettings } from '../features/sender/settings.ts';
 import { formatBytes, formatDuration } from '../utils/format.ts';
 
 type Screen =
@@ -15,7 +15,9 @@ type Screen =
   | { name: 'summary'; summary: TransmissionSummary; plan: TransferPlan; cfg: ResolvedQrConfig }
   | { name: 'receive' };
 
-const SETTINGS_KEY = 'optisend.sender.settings.v1';
+const SETTINGS_KEY = 'optisend.sender.settings.v2';
+/** v1 saved every field, including the old 750 ms default, even if the user never chose it. */
+const LEGACY_SETTINGS_KEY = 'optisend.sender.settings.v1';
 const RX_PREFS_KEY = 'optisend.receiver.prefs.v1';
 
 function loadRxPrefs(): ReceiverPrefs {
@@ -34,7 +36,10 @@ function loadRxPrefs(): ReceiverPrefs {
 function loadSettings(): SenderSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
-    return raw ? sanitizeSettings(JSON.parse(raw)) : { ...DEFAULT_SETTINGS };
+    if (raw) return sanitizeSettings(JSON.parse(raw));
+    const legacy = localStorage.getItem(LEGACY_SETTINGS_KEY);
+    if (legacy) return migrateLegacySettings(JSON.parse(legacy));
+    return { ...DEFAULT_SETTINGS };
   } catch {
     return { ...DEFAULT_SETTINGS };
   }

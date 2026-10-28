@@ -152,6 +152,18 @@ export class IdbSessionStore {
     }, () => out);
   }
 
+  /** Delete chunks belonging to sessions without a saved record; returns the bytes reclaimed. */
+  async deleteOrphanChunks(known: Set<string>): Promise<number> {
+    const usage = await this.usageBySession();
+    let reclaimed = 0;
+    for (const [sid, bytes] of usage) {
+      if (known.has(sid)) continue;
+      await new IdbChunkStore(this.db).deleteSession(sid);
+      reclaimed += bytes;
+    }
+    return reclaimed;
+  }
+
   /** Total payload bytes stored per session (from chunkMeta, without loading chunk data). */
   usageBySession(): Promise<Map<string, number>> {
     const out = new Map<string, number>();

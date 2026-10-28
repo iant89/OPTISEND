@@ -59,7 +59,8 @@ test('reload mid-transfer → progress restored from IndexedDB → resume → ve
     let got = 0;
     while (Date.now() - t0 < 60_000) {
       got = await validChunks(page);
-      if (got >= 3) break;
+      // Reload only once the file list (manifest) has been seen, so both files are known.
+      if (got >= 3 && (await page.locator('.session-title').innerText().catch(() => '')).startsWith('2 files')) break;
       await page.waitForTimeout(150);
     }
     assert.ok(got >= 3, `received ${got} chunks before reload`);
