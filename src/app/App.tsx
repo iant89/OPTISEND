@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ReceiveScreen, type ReceiverPrefs } from '../features/receiver/ReceiveScreen.tsx';
+import { DECODER_MODES } from '../features/receiver/decoders.ts';
 import { ReceiverStorage } from '../storage/persistence.ts';
 import { Home } from './Home.tsx';
 import type { TransferPlan } from '../protocol/sender.ts';
@@ -15,9 +16,10 @@ type Screen =
   | { name: 'summary'; summary: TransmissionSummary; plan: TransferPlan; cfg: ResolvedQrConfig }
   | { name: 'receive' };
 
-const SETTINGS_KEY = 'optisend.sender.settings.v2';
+const SETTINGS_KEY = 'optisend.sender.settings.v3';
 /** v1 saved every field, including the old 750 ms default, even if the user never chose it. */
-const LEGACY_SETTINGS_KEY = 'optisend.sender.settings.v1';
+/** Older settings, newest first: migrated once, then saved under SETTINGS_KEY. */
+const LEGACY_SETTINGS_KEYS = ['optisend.sender.settings.v2', 'optisend.sender.settings.v1'];
 const RX_PREFS_KEY = 'optisend.receiver.prefs.v1';
 
 function loadRxPrefs(): ReceiverPrefs {
@@ -25,7 +27,7 @@ function loadRxPrefs(): ReceiverPrefs {
   try {
     const r = JSON.parse(localStorage.getItem(RX_PREFS_KEY) ?? 'null') as Partial<ReceiverPrefs> | null;
     return {
-      decoderMode: r?.decoderMode && ['auto', 'jsqr', 'native', 'compare'].includes(r.decoderMode) ? r.decoderMode : d.decoderMode,
+      decoderMode: r?.decoderMode && DECODER_MODES.includes(r.decoderMode) ? r.decoderMode : d.decoderMode,
       vibrate: typeof r?.vibrate === 'boolean' ? r.vibrate : d.vibrate,
     };
   } catch {
@@ -37,8 +39,10 @@ function loadSettings(): SenderSettings {
   try {
     const raw = localStorage.getItem(SETTINGS_KEY);
     if (raw) return sanitizeSettings(JSON.parse(raw));
-    const legacy = localStorage.getItem(LEGACY_SETTINGS_KEY);
-    if (legacy) return migrateLegacySettings(JSON.parse(legacy));
+    for (const key of LEGACY_SETTINGS_KEYS) {
+      const legacy = localStorage.getItem(key);
+      if (legacy) return migrateLegacySettings(JSON.parse(legacy));
+    }
     return { ...DEFAULT_SETTINGS };
   } catch {
     return { ...DEFAULT_SETTINGS };

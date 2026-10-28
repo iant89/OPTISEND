@@ -8,7 +8,7 @@ import { QrCanvas } from '../../components/QrCanvas.tsx';
 import { HashClient, QrEncoderClient } from '../../workers/clients.ts';
 import { formatBytes, formatDuration, formatRate, pluralize } from '../../utils/format.ts';
 import {
-  estimateTransfer, INTERVAL_CHOICES, PASS_CHOICES, resolveQrConfig, type PresetChoice, type ResolvedQrConfig, type SenderSettings,
+  estimateTransfer, FAST_INTERVAL_MS, INTERVAL_CHOICES, PASS_CHOICES, resolveQrConfig, type PresetChoice, type ResolvedQrConfig, type SenderSettings,
 } from './settings.ts';
 import type { PassCount } from './scheduler.ts';
 
@@ -219,6 +219,7 @@ export function SendScreen({ queue, setQueue, settings, setSettings, onStart, on
               </label>
             ))}
           </div>
+          {settings.intervalMs < FAST_INTERVAL_MS && <p className="muted small">Fast: needs a receiver camera at 30 fps and good light. Use 100 ms if codes are missed.</p>}
         </fieldset>
 
         <fieldset className="field">
@@ -240,6 +241,10 @@ export function SendScreen({ queue, setQueue, settings, setSettings, onStart, on
             <span>Text-safe encoding <span className="muted">(Base45 · for receivers whose scanner only returns text · ~3% slower)</span></span>
           </label>
           <label className="field check">
+            <input type="checkbox" checked={settings.colorLayers === 3} onChange={(e: ChangeEvent<HTMLInputElement>) => update({ colorLayers: e.currentTarget.checked ? 3 : 1 })} />
+            <span>Colour: 3 codes per frame <span className="muted">(experimental · red, green and blue layers · the receiver needs this OptiSend version)</span></span>
+          </label>
+          <label className="field check">
             <input type="checkbox" checked={settings.strategy === 'round-robin'} onChange={(e: ChangeEvent<HTMLInputElement>) => update({ strategy: e.currentTarget.checked ? 'round-robin' : 'sequential' })} />
             <span>Interleave files <span className="muted">(round-robin, so small files finish sooner)</span></span>
           </label>
@@ -257,8 +262,8 @@ export function SendScreen({ queue, setQueue, settings, setSettings, onStart, on
       <section className="card estimate" aria-labelledby="est-h" aria-live="polite">
         <h2 id="est-h">Estimate</h2>
         <dl className="stats">
-          <div><dt>QR codes per pass</dt><dd>{estimate.valid ? estimate.framesPerPass.toLocaleString() : '—'}</dd></div>
-          <div><dt>Bytes per code</dt><dd>{estimate.chunkSize > 0 ? estimate.chunkSize.toLocaleString() : '—'}</dd></div>
+          <div><dt>{settings.colorLayers > 1 ? 'Frames per pass' : 'QR codes per pass'}</dt><dd>{estimate.valid ? estimate.framesPerPass.toLocaleString() : '—'}</dd></div>
+          <div><dt>Bytes per code</dt><dd>{estimate.chunkSize > 0 ? `${estimate.chunkSize.toLocaleString()}${settings.colorLayers > 1 ? ` × ${settings.colorLayers}` : ''}` : '—'}</dd></div>
           <div><dt>One pass</dt><dd>{estimate.valid ? formatDuration(estimate.passMs) : '—'}</dd></div>
           <div><dt>Passes</dt><dd>{settings.passes === 'continuous' ? 'Until stopped' : settings.passes}</dd></div>
           <div><dt>Total time</dt><dd>{!estimate.valid ? '—' : estimate.totalMs === null ? 'Loops' : formatDuration(estimate.totalMs)}</dd></div>

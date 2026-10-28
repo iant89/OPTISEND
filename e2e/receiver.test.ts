@@ -36,13 +36,17 @@ const FILES = [
 ];
 
 /** Run the sender app and screenshot every distinct code it displays. */
-async function recordSender(browser: Browser): Promise<string[]> {
+async function recordSender(browser: Browser, colour: boolean): Promise<string[]> {
   const page = await browser.newPage({ viewport: { width: 1280, height: 800 } });
   await page.goto(server.url);
   await page.getByRole('button', { name: /Send files/ }).click();
   await page.setInputFiles('#file-input', FILES);
   await page.getByText('1 s', { exact: true }).click();
   await page.getByText('1×').click();
+  if (colour) {
+    await page.getByText('Advanced').click();
+    await page.getByLabel(/Colour: 3 codes per frame/).check();
+  }
   await page.getByText('Ready to transmit.').waitFor({ timeout: 15_000 });
   await page.getByRole('button', { name: 'Start transfer' }).click();
   const shots: string[] = [];
@@ -66,17 +70,18 @@ async function recordSender(browser: Browser): Promise<string[]> {
   return shots;
 }
 
-test('sender app → simulated phone camera → receiver app: files verified and saved byte-for-byte', { skip: !hasCv2 && 'python3/OpenCV not available', timeout: 300_000 }, async () => {
+for (const colour of [false, true]) test(`sender app → simulated phone camera → receiver app${colour ? ' (colour: 3 codes per frame)' : ''}: files verified and saved byte-for-byte`, { skip: !hasCv2 && 'python3/OpenCV not available', timeout: 300_000 }, async () => {
   const senderBrowser = await chromium.launch();
   let shots: string[];
   try {
-    shots = await recordSender(senderBrowser);
+    shots = await recordSender(senderBrowser, colour);
   } finally {
     await senderBrowser.close();
   }
-  assert.ok(shots.length >= 10, `captured ${shots.length} codes`);
+  // 15 packets: one per frame in black and white; data packets three per frame in colour.
+  assert.ok(shots.length >= (colour ? 5 : 10), `captured ${shots.length} codes`);
 
-  const video = join(dir, 'camera.y4m');
+  const video = join(dir, colour ? 'camera-colour.y4m' : 'camera.y4m');
   const mk = spawnSync('python3', ['scripts/make_camera_video.py', video, '6', '7', ...shots], { encoding: 'utf8' });
   assert.equal(mk.status, 0, mk.stderr);
 
@@ -88,6 +93,15 @@ test('sender app → simulated phone camera → receiver app: files verified and
   const page = await ctx.newPage();
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  // Every request (page and workers) must stay on the app's own server: no CDN for the ZXing WebAssembly.
+  const requests: string[] = [];
+  ctx.on('request', (r) => requests.push(r.url()));
+  // Main-thread responsiveness: record long tasks (≥ 50 ms) while receiving.
+  await ctx.addInitScript(() => {
+    const w = window as unknown as { __longTasks: number[] };
+    w.__longTasks = [];
+    try { new PerformanceObserver((l) => { for (const e of l.getEntries()) w.__longTasks.push(Math.round(e.duration)); }).observe({ type: 'longtask', buffered: true }); } catch { /* unsupported */ }
+  });
   await page.goto(server.url);
   await page.getByRole('button', { name: /Receive transfer/ }).click();
   await page.getByText('Receiving…').or(page.getByText('All files received and verified')).first().waitFor({ timeout: 60_000 });
@@ -104,6 +118,8 @@ test('sender app → simulated phone camera → receiver app: files verified and
   const speeds = await page.locator('.rx-file .speed-final').allInnerTexts();
   assert.equal(speeds.length, FILES.length, JSON.stringify(speeds));
   for (const text of speeds) {
+    // A file whose chunks all arrive in one capture has no meaningful rate (colour mode packs 3 chunks per frame).
+    if (/^Received instantly/.test(text)) continue;
     const m = /Received in (\d+)s · ([\d.]+) (B|KB)\/s/.exec(text);
     assert.ok(m, `speed text: ${text}`);
     const bps = Number(m[2]) * (m[3] === 'KB' ? 1024 : 1);
@@ -119,6 +135,25 @@ test('sender app → simulated phone camera → receiver app: files verified and
   }
   const diag = await page.evaluate(() => document.querySelector('.stats.compact')?.textContent ?? '');
   console.log(`# ${shots.length} codes filmed; receiver stats: ${diag}`);
+  const scanInfo = await page.evaluate(() => document.querySelector('.receive details p.muted.small')?.textContent ?? '');
+  console.log(`# scanner: ${scanInfo}`);
+  const longTasks = await page.evaluate(() => (window as unknown as { __longTasks: number[] }).__longTasks);
+  console.log(`# main-thread long tasks (≥50 ms) during the session: ${longTasks.length}${longTasks.length ? ` (max ${Math.max(...longTasks)} ms, total ${longTasks.reduce((x, y) => x + y, 0)} ms)` : ''}`);
+  if (colour) {
+    assert.match(scanInfo, /[1-9][\d,]* colour frames/, 'the receiver split colour frames into channels');
+    assert.ok(requests.some((u) => u.endsWith('/assets/colour.worker.js')), 'colour frames are split in the colour worker');
+  }
+  else assert.doesNotMatch(scanInfo, /colour frames/, 'black-and-white frames are never treated as colour');
+
+  // Automatic mode decoded with ZXing (WebAssembly) in its worker, loaded from the app itself.
+  const decoders = await page.evaluate(() => [...document.querySelectorAll('.diag-table tbody tr')].map((tr) => [...tr.children].map((c) => c.textContent ?? '')));
+  console.log(`# decoders (name, read, accepted, avg ms): ${JSON.stringify(decoders)}`);
+  const zx = decoders.find((r) => r[0]?.startsWith('ZXing'));
+  assert.ok(zx && Number.parseInt(zx[2]!, 10) > 0, `ZXing accepted codes: ${JSON.stringify(decoders)}`);
+  assert.ok(!decoders.some((r) => r[0]?.startsWith('jsQR')), 'jsQR is only a fallback when ZXing is available');
+  assert.ok(requests.some((u) => u.endsWith('/assets/zxing_reader.wasm')), 'WebAssembly loaded from the app');
+  const foreign = requests.filter((u) => !u.startsWith(server.url) && !u.startsWith('blob:') && !u.startsWith('data:'));
+  assert.deepEqual(foreign, []);
 
   // Leaving the receiver keeps the files; the home screen lists them.
   await page.getByRole('button', { name: 'Stop receiving' }).click();
@@ -161,3 +196,23 @@ for (const [errName, expectTitle, expectHelp] of [
     }
   });
 }
+
+test('if the ZXing WebAssembly cannot load, the receiver falls back to jsQR', { timeout: 60_000 }, async () => {
+  const browser = await chromium.launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
+  try {
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    await ctx.route('**/zxing_reader.wasm', (r) => r.fulfill({ status: 404, body: 'blocked' }));
+    const page = await ctx.newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.goto(server.url);
+    await page.getByRole('button', { name: /Receive transfer/ }).click();
+    // The decoder table appears once the scanner runs; with ZXing unavailable, Automatic uses jsQR.
+    await page.locator('.diag-table tbody tr').first().waitFor({ state: 'attached', timeout: 20_000 });
+    const names = await page.evaluate(() => [...document.querySelectorAll('.diag-table tbody th')].map((th) => th.textContent ?? ''));
+    assert.deepEqual(names, ['jsQR']);
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+  }
+});

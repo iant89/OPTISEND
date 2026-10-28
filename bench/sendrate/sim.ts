@@ -26,6 +26,9 @@ import { bytesSource } from '../../src/protocol/source.ts';
 import { frameForQr } from '../../src/protocol/transport.ts';
 import { encodeQr } from '../../src/qr/encoder.ts';
 import { decodeWithJsQr } from '../../src/qr/decoders/jsqr-core.ts';
+import { decodeWithZxing, loadZxing } from '../../src/qr/decoders/zxing-core.ts';
+import type { ScanHit } from '../../src/qr/decoders/types.ts';
+import { frameThumb, isSameFrame } from '../../src/features/receiver/dedupe.ts';
 import { acceptHit, nextScanGap } from '../../src/features/receiver/scanner.ts';
 import { scanRegion, targetScanSide } from '../../src/features/receiver/region.ts';
 import { DEFAULT_SETTINGS, resolveQrConfig } from '../../src/features/sender/settings.ts';
@@ -42,6 +45,14 @@ export interface SimConfig {
   /** Randomise the scanner's gap ±25% like FrameScanner (nextScanGap). */
   jitter?: boolean;
   seed: number;
+  /** Decoder (default jsQR, as when the benchmark was written). */
+  decoder?: 'jsqr' | 'zxing';
+  /** Main-thread cost per scan (draw + read back + locate), ms before deviceFactor. Default 0. */
+  captureMs?: number;
+  /** Capture the next frame while the previous decodes (never queueing: only if the decoder is free when capture ends). */
+  pipeline?: boolean;
+  /** Skip decoding a frame whose 32×32 thumbnail matches the last successfully decoded frame (src/features/receiver/dedupe.ts). */
+  dedupe?: boolean;
 }
 
 export interface SimResult {
@@ -63,7 +74,11 @@ export interface SimResult {
   /** Best possible: payload bytes / pass time. */
   theoreticalBps: number;
   scans: number;
+  /** Frames captured but not decoded because they matched the last decoded frame (dedupe). */
+  dupSkips: number;
   tornFrames: number;
+  /** Torn frames that still decoded to a packet. */
+  tornDecoded: number;
   avgDecodeMs: number;
   /** The engine's own per-file timing (first captured chunk → verified), as the app displays it. */
   fileElapsedMs: number | null;
@@ -173,17 +188,26 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
   const nt = noise();
   const dataIdx = new Set(p.frames.map((f, i) => (f.kind === 'data' ? i : -1)).filter((i) => i >= 0));
   const capturedFirstPass = new Set<number>();
-  let scans = 0, torn = 0, decodeTotal = 0, completeMs: number | null = null;
-  let busyUntil = 0, lastAttempt = -Infinity;
+  let scans = 0, torn = 0, tornDecoded = 0, dupSkips = 0, decodeTotal = 0, completeMs: number | null = null;
+  // Sequential (today): one scan at a time; capture + decode keep the scanner busy.
+  // Pipelined: capture (main thread) and decode (worker) overlap; a capture starts only if the
+  // decoder will be free when it ends, so frames never queue (latest wins).
+  let captureFreeAt = 0, decodeFreeAt = 0, lastAttempt = -Infinity;
   const nextGap = () => (c.jitter ? nextScanGap(c.maxFps, rnd) : 1000 / c.maxFps);
   let gap = nextGap();
   const phase = rnd() * camPeriod;
   const sigma16 = sigma; // noise table values are N(0,1)×16 → scale by sigma/16 using integer math below
+  const captureCost = (c.captureMs ?? 0) * c.deviceFactor;
+  const decoder = c.decoder ?? 'jsqr';
+  let lastThumb: Float32Array | null = null;
 
   for (let j = 0; ; j++) {
     const tf = phase + j * camPeriod + (rnd() - 0.5) * 2;
     if (tf > maxPasses * passMs) break;
-    if (tf < busyUntil || tf - lastAttempt < gap) continue;
+    if (tf < captureFreeAt || tf - lastAttempt < gap) continue;
+    if (c.pipeline ? decodeFreeAt > tf + captureCost : tf < decodeFreeAt) continue;
+    lastAttempt = tf;
+    captureFreeAt = tf + captureCost;
 
     // Compose the cropped frame with rolling shutter + exposure blending.
     const { sx, sy, sSize, dSize } = regions[regionMode]!;
@@ -207,7 +231,6 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
         for (let x = 0; x < sSize; x++) crop[dst + x] = (a[rowOff + x]! * wo + next[rowOff + x]! * wn) >> 8;
       }
     }
-    if (isTorn) torn++;
     // Downscale (area average) to the scanner's decode size, add sensor noise, RGBA.
     const rgba = new Uint8ClampedArray(dSize * dSize * 4);
     const scale = sSize / dSize;
@@ -225,25 +248,36 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
       }
     }
 
+    const thumb = c.dedupe ? frameThumb(rgba, dSize) : null;
+    if (thumb && lastThumb && isSameFrame(thumb, lastThumb)) {
+      dupSkips++;
+      gap = 0; // look again on the next camera frame, like a frame the locator skipped
+      continue;
+    }
+    if (isTorn) torn++;
+
     // Decode exactly as the scan worker does; time it for real.
     const t0 = performance.now();
-    const hit = decodeWithJsQr({ data: rgba, width: dSize, height: dSize });
+    const hit: ScanHit | null = decoder === 'zxing' ? await decodeWithZxing({ data: rgba, width: dSize, height: dSize }) : decodeWithJsQr({ data: rgba, width: dSize, height: dSize });
     const decodeMs = (performance.now() - t0) * c.deviceFactor;
     decodeTotal += decodeMs;
     scans++;
-    lastAttempt = tf;
     gap = nextGap();
-    busyUntil = tf + decodeMs;
+    const decodeStart = c.pipeline ? Math.max(captureFreeAt, decodeFreeAt) : captureFreeAt;
+    decodeFreeAt = decodeStart + decodeMs;
+    if (!c.pipeline) captureFreeAt = decodeFreeAt;
     const pkt = hit ? acceptHit(hit) : null;
     if (pkt || hit) missesInMode = 0;
     else if (++missesInMode >= 2) { missesInMode = 0; regionMode = (regionMode + 1) % 2; }
     if (!pkt) continue;
-    simNow = busyUntil;
+    if (thumb) lastThumb = thumb;
+    if (isTorn) tornDecoded++;
+    simNow = decodeFreeAt;
     const res = await engine.ingest(pkt);
     // Which code was it? (match bytes against the plan's packets)
     const which = p.packets.findIndex((q) => q.length === pkt.length && q.every((v, i) => v === pkt[i]));
-    if (which >= 0 && dataIdx.has(which) && busyUntil < passMs) capturedFirstPass.add(which);
-    if (res.status === 'accepted' && res.fileStatus === 'verified') { completeMs = busyUntil; break; }
+    if (which >= 0 && dataIdx.has(which) && decodeFreeAt < passMs) capturedFirstPass.add(which);
+    if (res.status === 'accepted' && res.fileStatus === 'verified') { completeMs = decodeFreeAt; break; }
   }
 
   const payload = p.fileSize;
@@ -258,10 +292,16 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
     passesNeeded: completeMs === null ? null : completeMs / passMs,
     goodputBps: completeMs === null ? null : (payload * 1000) / completeMs,
     theoreticalBps: (payload * 1000) / passMs,
-    scans, tornFrames: torn,
+    scans, dupSkips, tornFrames: torn, tornDecoded,
     avgDecodeMs: scans ? decodeTotal / scans : 0,
     fileElapsedMs: completeMs === null ? null : engine.snapshot()[0]?.files[0]?.timing.elapsedMs ?? null,
   };
+}
+
+/** Load ZXing for the simulator (Node: bytes from disk). */
+export async function loadZxingForSim(): Promise<void> {
+  const b = readFileSync('src/vendor/zxing-wasm/zxing_reader.wasm');
+  await loadZxing({ wasmBinary: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
 }
 
 // ── CLI: sweep ──

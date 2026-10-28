@@ -8,6 +8,7 @@ import { bytesSource } from '../src/protocol/source.ts';
 import { decodePacket } from '../src/protocol/packet.ts';
 import { frameForQr, unframeScan } from '../src/protocol/transport.ts';
 import { formatBytes, formatDuration } from '../src/utils/format.ts';
+import { groupFrames } from '../src/features/sender/frames.ts';
 import { makeBytes } from './helpers.ts';
 
 const files = [
@@ -23,6 +24,11 @@ test('estimate matches the real plan frame-for-frame across settings', async () 
     { preset: 'high-throughput', manifestEvery: 0 },
     { preset: 'custom', customVersion: 12, customEcc: 'Q', customPayload: 50, manifestEvery: 7 },
     { strategy: 'round-robin', manifestEvery: 1 },
+    { colorLayers: 3 },
+    { colorLayers: 3, manifestEvery: 7 },
+    { colorLayers: 3, manifestEvery: 0, preset: 'balanced' },
+    { colorLayers: 3, manifestEvery: 3 },
+    { colorLayers: 3, strategy: 'round-robin', manifestEvery: 1 },
   ];
   for (const v of variants) {
     const s = { ...DEFAULT_SETTINGS, ...v };
@@ -32,11 +38,11 @@ test('estimate matches the real plan frame-for-frame across settings', async () 
       { chunkSize: cfg.chunkSize, maxManifestPacketBytes: cfg.maxPacketBytes },
     );
     const est = estimateTransfer(files, s);
-    const refs = [...plan.pass({ strategy: s.strategy, manifestEvery: s.manifestEvery })];
+    const refs = groupFrames([...plan.pass({ strategy: s.strategy, manifestEvery: s.manifestEvery })], s.colorLayers);
     assert.equal(est.framesPerPass, refs.length, JSON.stringify(v));
     assert.equal(est.manifestParts, plan.manifestPackets.length);
     assert.equal(est.chunkSize, cfg.chunkSize);
-    const manifestFrames = refs.filter((r) => r.kind === 'manifest').length;
+    const manifestFrames = refs.filter((g) => g[0]!.kind === 'manifest').length;
     assert.equal(est.passMs, (refs.length + (s.holdManifest ? manifestFrames : 0)) * s.intervalMs);
   }
 });
@@ -85,6 +91,17 @@ test('persisted settings are sanitised field by field', () => {
   assert.equal(s.transport, DEFAULT_SETTINGS.transport);
   assert.equal(s.holdManifest, DEFAULT_SETTINGS.holdManifest);
   assert.equal(s.manifestEvery, DEFAULT_SETTINGS.manifestEvery);
+  assert.equal(s.colorLayers, 1);
+  assert.equal(sanitizeSettings({ colorLayers: 3 }).colorLayers, 3);
+  assert.equal(sanitizeSettings({ colorLayers: 2 }).colorLayers, 1);
+});
+
+test('groupFrames: data packs into colour layers per run; manifests always alone', () => {
+  const m = (part: number) => ({ kind: 'manifest' as const, part });
+  const d = (i: number) => ({ kind: 'data' as const, fileId: 0, chunkIndex: i });
+  const refs = [m(0), d(0), d(1), d(2), d(3), m(0), d(4), d(5)];
+  assert.deepEqual(groupFrames(refs, 1), refs.map((r) => [r]));
+  assert.deepEqual(groupFrames(refs, 3), [[m(0)], [d(0), d(1), d(2)], [d(3)], [m(0)], [d(4), d(5)]]);
 });
 
 test('QR layout: integer device pixels per module, quiet zone included, never larger than available', () => {

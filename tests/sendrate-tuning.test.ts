@@ -11,13 +11,16 @@ import { unframeScan } from '../src/protocol/transport.ts';
 import { readPixelPerfectQr } from '../e2e/qr-read.ts';
 import { makeBytes, plan } from './helpers.ts';
 
-test('default interval is 200 ms; old saved defaults migrate, real choices are kept', () => {
-  assert.equal(DEFAULT_SETTINGS.intervalMs, 200);
-  assert.ok((INTERVAL_CHOICES as readonly number[]).includes(200));
-  assert.equal(migrateLegacySettings({ ...DEFAULT_SETTINGS, intervalMs: 750, preset: 'balanced' }).intervalMs, 200);
+test('default interval is 100 ms; old saved defaults migrate, real choices are kept', () => {
+  assert.equal(DEFAULT_SETTINGS.intervalMs, 100);
+  for (const ms of [50, 66, 100, 200]) assert.ok((INTERVAL_CHOICES as readonly number[]).includes(ms));
+  // Settings still on an earlier default (750 ms in v1, 200 ms in v2) move to the new one; other choices stay.
+  assert.equal(migrateLegacySettings({ ...DEFAULT_SETTINGS, intervalMs: 750, preset: 'balanced' }).intervalMs, 100);
+  assert.equal(migrateLegacySettings({ ...DEFAULT_SETTINGS, intervalMs: 200, preset: 'balanced' }).intervalMs, 100);
   assert.equal(migrateLegacySettings({ ...DEFAULT_SETTINGS, intervalMs: 750, preset: 'balanced' }).preset, 'balanced');
   assert.equal(migrateLegacySettings({ ...DEFAULT_SETTINGS, intervalMs: 1000 }).intervalMs, 1000);
-  assert.equal(migrateLegacySettings(null).intervalMs, 200);
+  assert.equal(migrateLegacySettings({ ...DEFAULT_SETTINGS, intervalMs: 50 }).intervalMs, 50);
+  assert.equal(migrateLegacySettings(null).intervalMs, 100);
 });
 
 test('maskOffset rotates away from the automatic mask and matches forcing that mask', () => {
@@ -54,7 +57,7 @@ test('the same packet renders with a different mask each pass and decodes to ide
       assert.deepEqual([...pkt!], [...expected], `${transport} pass ${pass}`);
     }
     assert.equal(masks.size, 8, `${transport}: all masks used across 8 passes`);
-    assert.ok(r.has(ref, 9), 'pass 9 reuses pass 1\'s mask (and its cached render)');
+    assert.ok(r.has([ref], 9), 'pass 9 reuses pass 1\'s mask (and its cached render)');
   }
 });
 

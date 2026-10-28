@@ -6,7 +6,7 @@ import { SegmentedBar, SEG_CURRENT, SEG_EMPTY, SEG_FILLED } from '../../componen
 import { useWakeLock } from '../../hooks/useWakeLock.ts';
 import { QrEncoderClient } from '../../workers/clients.ts';
 import { formatDuration } from '../../utils/format.ts';
-import { FrameRenderer } from './frames.ts';
+import { FrameRenderer, groupFrames } from './frames.ts';
 import { TransmissionScheduler, type FrameEvent, type SchedulerState, type SchedulerStats } from './scheduler.ts';
 import { INTERVAL_CHOICES, type ResolvedQrConfig, type SenderSettings } from './settings.ts';
 
@@ -30,21 +30,25 @@ const PREFETCH = 3;
 
 export function TransmitView({ plan, cfg, settings, onExit }: Props) {
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const frames = useMemo<PacketRef[]>(() => [...plan.pass({ strategy: settings.strategy, manifestEvery: settings.manifestEvery })], [plan, settings.strategy, settings.manifestEvery]);
+  // Each displayed frame: one packet, or up to three data packets in colour layers.
+  const frames = useMemo<PacketRef[][]>(
+    () => groupFrames([...plan.pass({ strategy: settings.strategy, manifestEvery: settings.manifestEvery })], settings.colorLayers),
+    [plan, settings.strategy, settings.manifestEvery, settings.colorLayers],
+  );
   const scheduler = useMemo(
-    () => new TransmissionScheduler<PacketRef>({
+    () => new TransmissionScheduler<PacketRef[]>({
       frames,
       intervalMs: settings.intervalMs,
       passes: settings.passes,
-      holdFactor: (f) => (settings.holdManifest && f.kind === 'manifest' ? 2 : 1),
+      holdFactor: (f) => (settings.holdManifest && f[0]!.kind === 'manifest' ? 2 : 1),
     }),
     [frames],
   );
   const encoder = useMemo(() => new QrEncoderClient(), []);
   const renderer = useMemo(() => new FrameRenderer(plan, cfg, encoder), [plan, cfg, encoder]);
 
-  const [matrix, setMatrix] = useState<QrMatrix | null>(null);
-  const [frame, setFrame] = useState<FrameEvent<PacketRef> | null>(null);
+  const [matrix, setMatrix] = useState<QrMatrix[] | null>(null);
+  const [frame, setFrame] = useState<FrameEvent<PacketRef[]> | null>(null);
   const [state, setState] = useState<SchedulerState>('idle');
   const [interval, setIntervalMs] = useState(settings.intervalMs);
   const [announce, setAnnounce] = useState('');
@@ -79,7 +83,7 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
       const token = ++drawToken.current;
       const ready = renderer.has(e.frame, e.pass);
       const t0 = performance.now();
-      renderer.get(e.frame, e.pass).then((m) => {
+      renderer.getGroup(e.frame, e.pass).then((m) => {
         if (token !== drawToken.current) return; // a newer frame superseded this one
         if (!ready && performance.now() - t0 > 50) lateFrames.current++;
         setMatrix(m);
@@ -95,7 +99,7 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
     });
     renderer.prefetch(frames.slice(0, PREFETCH + 1).map((frame) => ({ frame, pass: 1 })));
     // Give the first frame a moment to render before the clock starts.
-    void renderer.get(frames[0]!).finally(() => scheduler.start());
+    void renderer.getGroup(frames[0]!).finally(() => scheduler.start());
     return () => {
       offFrame();
       offState();
@@ -145,12 +149,15 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
   };
 
   // ── Frame description ──
-  const ref = frame?.frame;
+  const group = frame?.frame;
+  const ref = group?.[0];
+  const layers = group?.length ?? 1;
   const file = ref?.kind === 'data' ? plan.files[ref.fileId] : undefined;
   const passLabel = settings.passes === 'continuous' ? `Pass ${frame?.pass ?? 1}` : `Pass ${frame?.pass ?? 1} of ${scheduler.passes}`;
   const remainingMs = scheduler.passDurationMs() * ((frames.length - 1 - (frame?.index ?? 0)) / frames.length);
   const qrLabel = !ref ? 'Preparing first QR code'
     : ref.kind === 'manifest' ? `QR code: file list, part ${ref.part + 1} of ${plan.manifestPackets.length}`
+    : layers > 1 ? `Colour QR code with ${layers} chunks, starting at ${file?.name}, chunk ${ref.chunkIndex + 1} of ${file?.chunkCount}`
     : `QR code: ${file?.name}, chunk ${ref.chunkIndex + 1} of ${file?.chunkCount}`;
 
   return (
@@ -166,7 +173,7 @@ export function TransmitView({ plan, cfg, settings, onExit }: Props) {
             <>
               <p className="frame-file" title={file.name}>{file.name}</p>
               <p className="muted">
-                File {ref.fileId + 1} of {plan.files.length} · chunk {(ref.chunkIndex + 1).toLocaleString()} of {file.chunkCount.toLocaleString()}
+                File {ref.fileId + 1} of {plan.files.length} · chunk {(ref.chunkIndex + 1).toLocaleString()} of {file.chunkCount.toLocaleString()}{layers > 1 ? ` · ${layers} chunks in colour` : ''}
               </p>
             </>
           ) : (

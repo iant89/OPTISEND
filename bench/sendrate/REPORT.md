@@ -137,3 +137,54 @@ Simulator results: 12 scans/s cap, three camera poses (seed 2 is the awkward ang
 - **Individual times move by ±1–5 s from run to run,** because jitter and mask choice change which frames land. The worst case is what improved.
 
 Real app check with the new code (Chromium fake webcam, awkward angle, 200 ms per code): **received in 16 s** (simulator: 16.3 s). Before the change this configuration never completed.
+
+## Torn frames mostly still decode
+
+Measured with `tornDecoded` in `sim.ts` (rotating masks, scan jitter, 12 scans/s cap, this machine). A frame counts as torn if any row was exposed across a code switch.
+
+| Per code | Seed 1: torn / still decoded (of all scans) | Seed 3: torn / still decoded (of all scans) |
+|---|---|---|
+| 200 ms | 28 / 27 (of 112) | 25 / 24 (of 124) |
+| 150 ms | 20 / 14 (of 84) | 30 / 21 (of 122) |
+| 100 ms | 43 / 40 (of 83) | 27 / 24 (of 67) |
+
+The tear is usually a soft blend over part of the code, which QR error correction absorbs, and the frame decodes as one of the two codes. At the 200 ms default, torn frames that fail cost about 1% of decode attempts, and about 7% at 150 ms. Rejecting torn frames before decoding (for example with a sender border whose colour alternates per code) would discard far more good decodes than it saves.
+
+## With ZXing: the scan cap was the bottleneck (implemented)
+
+`sim.ts` now models the current scanner: ZXing (`decoder: 'zxing'`), 8 ms of main-thread capture per scan (draw, read back, locate; ×device factor), optional pipelining (capture the next frame while one decodes, never queueing) and duplicate-frame skipping (`src/features/receiver/dedupe.ts`). Time to verified, seeds 1 / 2 / 3, average first-pass capture in brackets; ✗ = not verified within 5 passes.
+
+**This machine (×1):**
+
+| Scanner | 200 ms | 100 ms | 66 ms | 50 ms |
+|---|---|---|---|---|
+| Cap 12/s (before) | 8.3 / 8.3 / 8.3 (100%) | 8.3 / 5.6 / 4.1 (98%) | 10.0 / ✗ / 12.9 (57%) | ✗ / 8.4 / ✗ (43%) |
+| Cap 20/s | 8.2 / 8.2 / 8.2 (100%) | 4.2 / 4.2 / 4.2 (100%) | 2.8 / 5.4 / 2.8 (98%) | 4.1 / 4.0 / 4.0 (62%) |
+| No cap | 8.2 / 8.2 / 8.2 (100%) | 4.1 / 4.1 / 4.1 (100%) | 2.7 / 2.7 / 2.7 (100%) | 2.1 / 2.1 / 2.1 (100%) |
+| No cap + pipeline + dedupe (now) | 8.2 / 8.2 / 8.2 (100%) | 4.1 / 4.1 / 4.1 (100%) | 2.7 / 2.7 / 2.7 (100%) | 2.1 / 2.1 / 2.1 (100%) |
+
+**3× slower device:**
+
+| Scanner | 200 ms | 100 ms | 66 ms | 50 ms |
+|---|---|---|---|---|
+| Cap 12/s (before) | 8.3 / 8.3 / 8.3 (100%) | 8.3 / 5.6 / 4.2 (98%) | 10.0 / ✗ / 12.9 (56%) | ✗ / 8.4 / ✗ (43%) |
+| No cap | 8.3 / 8.3 / 8.3 (100%) | 4.2 / 4.2 / 4.2 (100%) | 4.6 / 8.2 / 2.8 (92%) | 4.4 / 5.5 / 4.1 (68%) |
+| No cap + pipeline | 8.3 / 8.3 / 8.3 (100%) | 4.2 / 4.2 / 4.2 (100%) | 2.8 / 2.8 / 2.8 (100%) | 2.1 / 2.1 / 2.1 (99%) |
+
+**Dim light** (camera at 15 fps, 33 ms exposure; no cap + pipeline + dedupe, ×1):
+
+| Per code | Seed 1 / 2 / 3 |
+|---|---|
+| 200 ms | 8.3 s / 8.3 s / 8.3 s (all 100%) |
+| 100 ms | 4.1 s / 4.1 s / 4.1 s (all 100%) |
+| 66 ms | 4.6 s (65%) / 4.6 s (40%) / 4.2 s (93%) |
+| 50 ms | 6.7 s (65%) / 6.3 s (53%) / 4.1 s (50%) |
+
+**Findings:**
+1. **At 200 ms the receiver was no longer the limit.** ZXing captured every code in the first pass even with the 12/s cap; the sender's interval set the time.
+2. **The 12/s cap blocked faster sending.** It fails from 66 ms. With no cap, every camera frame is a scan and 50 ms works (2.1 s instead of 8.2 s).
+3. **Pipelining is what keeps a slow phone up at 66–50 ms** (68% → 99% first-pass at 50 ms on the 3× slower device).
+4. **Duplicate skipping saves decodes, not time.** At 200 ms it cut decodes from 247 to 41 (one per code) in the simulator, where frames of the same code are identical apart from noise. In the browser test, whose fake camera re-draws hand jitter every frame, it rarely triggers. On real phones the saving depends on how steady the hand is; it never costs a code.
+5. **100 ms is the new default.** It's twice as fast as 200 ms and still 100% first-pass in every pose, on both device speeds and in dim light. 66 ms and 50 ms are offered as fast options that need a 30 fps camera and good light.
+
+Caveats: the simulator has no autofocus hunting, motion blur or dropped camera frames, and the 8 ms capture cost is an estimate. Confirm on real devices.

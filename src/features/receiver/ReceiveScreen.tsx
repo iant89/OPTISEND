@@ -61,9 +61,10 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
         video.srcObject = stream;
         await video.play().catch(() => undefined);
         const { chain } = await buildDecoderChain(prefs.decoderMode);
+        const zxingFirst = chain.ids[0] === 'zxing';
         if (disposed) { chain.dispose(); return; }
         chainDispose = () => chain.dispose();
-        const scanner = new FrameScanner(video, chain, (packet) => { void engine.ingest(packet); });
+        const scanner = new FrameScanner(video, chain, (packet) => { void engine.ingest(packet); }, { alternateGuide: !zxingFirst });
         scannerRef.current = scanner;
         scanner.start();
         setCam({ kind: 'live' });
@@ -83,7 +84,7 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
     })();
     return () => {
       disposed = true;
-      scannerRef.current?.stop();
+      scannerRef.current?.dispose();
       scannerRef.current = null;
       chainDispose?.();
       stopStream(stream);
@@ -225,6 +226,9 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
             <p className="muted small">
               {scanStats.fps.toFixed(1)} scans/s · {scanStats.framesScanned.toLocaleString()} frames · {scanStats.packets.toLocaleString()} packets
               {scanStats.foreign ? ` · ${scanStats.foreign} other codes ignored` : ''}{scanStats.lastVersion ? ` · QR v${scanStats.lastVersion}` : ''}
+              {` · code located in ${scanStats.framesLocated.toLocaleString()} frames, ${scanStats.framesSkipped.toLocaleString()} empty frames skipped`}
+              {scanStats.framesDuplicate ? ` · ${scanStats.framesDuplicate.toLocaleString()} repeat frames skipped` : ''}
+              {scanStats.framesColour ? ` · ${scanStats.framesColour.toLocaleString()} colour frames` : ''}
             </p>
           )}
           {decoderStats.length > 0 && (
