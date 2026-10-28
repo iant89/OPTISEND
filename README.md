@@ -16,8 +16,8 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 154 unit tests (node:test via tsx)
-npm run test:e2e     # 16 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
+npm test             # 160 unit tests (node:test via tsx)
+npm run test:e2e     # 17 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
 
@@ -130,6 +130,33 @@ Before decoding, the scanner looks for the code's three finder patterns in a hal
   | Balanced v25 | hand-held | 0/24 | 7/24 |
 
   No false positives on 24 busy non-QR screens.
+
+### Colour mode (experimental): 3 QR codes per frame
+Sender → Advanced → "Colour: 3 codes per frame". Each displayed frame overlays three ordinary QR codes, one per colour channel: code 1 drives red, code 2 green, code 3 blue (`compositeRgb` in `src/qr/render.ts`).
+- **Same protocol.** Each code carries a normal OptiSend packet.
+- **File list stays readable everywhere.** File-list frames are always black and white and shown alone, so any receiver can read them (`groupFrames` in `src/features/sender/frames.ts`).
+- **Finders still work.** All codes in a frame have the same version, so the finder squares, timing and alignment patterns coincide and appear black. The locator and decoders work unchanged.
+
+The receiver needs no setting (`src/qr/color.ts`):
+- **Detection:** it checks the share of saturated pixels after stretching each channel to its own range, so a colour cast on a black-and-white code doesn't count as colour.
+- **Unmixing:** it undoes the camera's colour mixing, estimated from the frame itself. The eight module colours (each channel dark or light) form eight clusters; k-means finds them, the structure of the colour cube labels them, and the inverse mix is applied.
+- **Decoding:** each channel is decoded as a grey image. A channel that fails after unmixing is retried raw.
+
+Measured in simulation (`tests/color-sim.test.ts`; the camera model adds 20% crosstalk, ±15% white balance, Bayer sampling and 4:2:0 chroma), aimed, ZXing:
+
+| Mode | Codes decoded | Data per frame |
+|---|---|---|
+| v25-M black and white | 11/12 | 778 B |
+| v40-L black and white | 8/12 | 1,831 B |
+| v25-M colour | 33/36 | 2,335 B |
+| v30-L colour | 31/36 | 4,035 B |
+
+In the browser test (`e2e/receiver.test.ts`), the same two files took 6 filmed frames instead of 14, and the 2.6 KB file arrived about 3× faster.
+
+**Limits:**
+- The camera model is an assumption: real screens, cameras, auto white balance and video compression decide. Test on real device pairs, with Compare-all diagnostics and the "colour frames" counter.
+- Colour unmixing runs on the main thread, about 20–60 ms per colour frame on this machine. It should move into the decoder worker.
+- Older OptiSend receivers read only the black-and-white file-list frames.
 
 ### Default transport is text-safe (Base45)
 The browser e2e test showed that desktop QR decoders return byte-mode content as *text* and cut it off at the first zero byte, so every binary frame was rejected (safely, by CRC/length checks). `BarcodeDetector.rawValue` and phone camera apps are text-only too. Text-safe mode works with any scanner and costs about 3% capacity. Binary mode stays available for receivers that read raw bytes.

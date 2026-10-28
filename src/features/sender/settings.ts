@@ -14,6 +14,13 @@ import type { PassCount } from './scheduler.ts';
 
 export type PresetChoice = PayloadPresetId | 'custom';
 
+/**
+ * QR codes per displayed frame. 3 = experimental colour mode: three codes
+ * overlaid in the red, green and blue channels (file-list frames stay black
+ * and white).
+ */
+export type ColorLayers = 1 | 3;
+
 export interface SenderSettings {
   preset: PresetChoice;
   /** Used when preset === 'custom'. */
@@ -30,6 +37,7 @@ export interface SenderSettings {
   manifestEvery: number;
   /** Show manifest frames for twice the interval. */
   holdManifest: boolean;
+  colorLayers: ColorLayers;
 }
 
 /** 200 ms is the default: the send-rate benchmark (status/sendrate-benchmark.md) found it ~3× faster than 750 ms with similar reliability. */
@@ -49,6 +57,7 @@ export const DEFAULT_SETTINGS: Readonly<SenderSettings> = Object.freeze({
   strategy: 'sequential',
   manifestEvery: 50,
   holdManifest: true,
+  colorLayers: 1,
 });
 
 export interface ResolvedQrConfig {
@@ -80,7 +89,7 @@ export interface TransferEstimate {
   chunkSize: number;
   dataFrames: number;
   manifestParts: number;
-  /** Frames in one pass including manifest repeats. */
+  /** Frames displayed in one pass, including manifest repeats (with colour layers, up to 3 data codes per frame). */
   framesPerPass: number;
   passMs: number;
   /** null for continuous mode. */
@@ -113,8 +122,13 @@ export function estimateTransfer(files: readonly FileLike[], s: SenderSettings):
 
   const repeats = s.manifestEvery > 0 ? Math.floor(Math.max(0, dataFrames - 1) / s.manifestEvery) : 0;
   const manifestFrames = parts * (1 + repeats);
-  const framesPerPass = dataFrames + manifestFrames;
-  const passMs = (dataFrames + manifestFrames * (s.holdManifest ? 2 : 1)) * s.intervalMs;
+  // Data packets are packed per run between manifest repeats (see groupFrames).
+  const layers = s.colorLayers;
+  const dataShown = s.manifestEvery > 0
+    ? repeats * Math.ceil(s.manifestEvery / layers) + Math.ceil((dataFrames - repeats * s.manifestEvery) / layers)
+    : Math.ceil(dataFrames / layers);
+  const framesPerPass = dataShown + manifestFrames;
+  const passMs = (dataShown + manifestFrames * (s.holdManifest ? 2 : 1)) * s.intervalMs;
   return {
     valid: true,
     problem: null,
@@ -147,6 +161,7 @@ export function sanitizeSettings(raw: unknown): SenderSettings {
     strategy: r.strategy === 'round-robin' || r.strategy === 'sequential' ? r.strategy : d.strategy,
     manifestEvery: isInt(r.manifestEvery, 0, 100_000) ? (r.manifestEvery as number) : d.manifestEvery,
     holdManifest: typeof r.holdManifest === 'boolean' ? r.holdManifest : d.holdManifest,
+    colorLayers: r.colorLayers === 3 ? 3 : 1,
   };
 }
 

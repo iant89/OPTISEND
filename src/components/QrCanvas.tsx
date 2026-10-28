@@ -3,7 +3,8 @@ import type { QrMatrix } from '../qr/encoder.ts';
 import { drawQr } from '../qr/render.ts';
 
 interface Props {
-  matrix: QrMatrix | null;
+  /** One code, or several same-size codes drawn as a colour composite. */
+  matrix: QrMatrix | readonly QrMatrix[] | null;
   /** Accessible description of what the code contains. */
   label: string;
   className?: string;
@@ -18,7 +19,7 @@ interface Props {
 export function QrCanvas({ matrix, label, className, maxCssPx }: Props) {
   const boxRef = useRef<HTMLDivElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
-  const matrixRef = useRef<QrMatrix | null>(matrix);
+  const matrixRef = useRef<QrMatrix | readonly QrMatrix[] | null>(matrix);
   matrixRef.current = matrix;
 
   const redraw = () => {

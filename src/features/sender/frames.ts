@@ -8,7 +8,30 @@ import type { PacketRef, TransferPlan } from '../../protocol/sender.ts';
 import { frameForQr } from '../../protocol/transport.ts';
 import type { QrMatrix } from '../../qr/encoder.ts';
 import type { QrEncoderClient } from '../../workers/clients.ts';
-import type { ResolvedQrConfig } from './settings.ts';
+import type { ColorLayers, ResolvedQrConfig } from './settings.ts';
+
+/**
+ * Pack one pass into displayed frames. With 3 colour layers, consecutive data
+ * packets share a frame (one per channel); manifest packets are always shown
+ * alone in black and white, so any receiver can read the file list. All data
+ * codes have the same version, so their function patterns coincide.
+ */
+export function groupFrames(refs: readonly PacketRef[], layers: ColorLayers): PacketRef[][] {
+  const out: PacketRef[][] = [];
+  let run: PacketRef[] = [];
+  const flush = () => { if (run.length) out.push(run); run = []; };
+  for (const ref of refs) {
+    if (ref.kind === 'manifest') {
+      flush();
+      out.push([ref]);
+      continue;
+    }
+    run.push(ref);
+    if (run.length === layers) flush();
+  }
+  flush();
+  return out;
+}
 
 export function refKey(ref: PacketRef): string {
   return ref.kind === 'manifest' ? `m${ref.part}` : `d${ref.fileId}:${ref.chunkIndex}`;
@@ -54,12 +77,17 @@ export class FrameRenderer {
     return p;
   }
 
-  prefetch(items: readonly { frame: PacketRef; pass: number }[]): void {
-    for (const it of items) void this.get(it.frame, it.pass).catch(() => undefined);
+  /** All codes of a displayed frame, in channel order. */
+  getGroup(group: readonly PacketRef[], pass = 1): Promise<QrMatrix[]> {
+    return Promise.all(group.map((ref) => this.get(ref, pass)));
   }
 
-  /** Synchronously check whether a frame is already rendered. */
-  has(ref: PacketRef, pass = 1): boolean {
-    return this.cache.has(`${refKey(ref)}@${maskOffsetForPass(pass)}`);
+  prefetch(items: readonly { frame: readonly PacketRef[]; pass: number }[]): void {
+    for (const it of items) void this.getGroup(it.frame, it.pass).catch(() => undefined);
+  }
+
+  /** Synchronously check whether every code of a frame is already rendered. */
+  has(group: readonly PacketRef[], pass = 1): boolean {
+    return group.every((ref) => this.cache.has(`${refKey(ref)}@${maskOffsetForPass(pass)}`));
   }
 }

@@ -5,12 +5,13 @@
  * downscales, and hands accepted packets to the caller.
  */
 import { DecoderChain } from '../../qr/decoders/chain.ts';
-import type { ScanHit } from '../../qr/decoders/types.ts';
+import type { ScanFrame, ScanHit } from '../../qr/decoders/types.ts';
 import { decodePacket } from '../../protocol/packet.ts';
 import { unframeScan } from '../../protocol/transport.ts';
 import { ProtocolError } from '../../protocol/errors.ts';
 import { locatorSide, regionForBox, scanRegion, targetScanSide, type ScanRegion } from './region.ts';
 import { locateQr } from '../../qr/detect/finder.ts';
+import { estimateColourMix, isColourFrame, splitChannels } from '../../qr/color.ts';
 
 export interface ScannerOptions {
   /** Average upper bound on decode attempts per second. */
@@ -39,6 +40,8 @@ export interface ScannerStats {
   framesLocated: number;
   /** Frames not decoded because the locator found no code. */
   framesSkipped: number;
+  /** Decoded frames detected as colour (three codes, one per channel). */
+  framesColour: number;
   /** Recent decode rate. */
   fps: number;
   lastDecoder: string | null;
@@ -122,7 +125,7 @@ export class FrameScanner {
   private readonly locCtx: CanvasRenderingContext2D | OffscreenCanvasRenderingContext2D;
   private readonly recent: number[] = [];
   private _region: ScanRegion | null = null;
-  readonly stats: ScannerStats = { framesScanned: 0, framesWithCode: 0, packets: 0, foreign: 0, framesLocated: 0, framesSkipped: 0, fps: 0, lastDecoder: null, lastVersion: null };
+  readonly stats: ScannerStats = { framesScanned: 0, framesWithCode: 0, packets: 0, foreign: 0, framesLocated: 0, framesSkipped: 0, framesColour: 0, fps: 0, lastDecoder: null, lastVersion: null };
   private readonly maxFps: number;
   private readonly fraction: number;
   private readonly alternateGuide: boolean;
@@ -231,23 +234,44 @@ export class FrameScanner {
       while (this.recent.length && now - this.recent[0]! > 2000) this.recent.shift();
       this.stats.fps = this.recent.length / 2;
 
-      let sawCode = false;
-      const res = await this.chain.decode({ data: img.data, width: img.width, height: img.height }, (hit) => {
-        sawCode = true;
-        return acceptHit(hit);
-      });
+      // A colour frame carries three codes, one per channel: undo the camera's colour mixing
+      // (estimated from the frame itself) and decode each channel as a grey image. A channel
+      // that fails after unmixing is retried raw, in case the colour fit was off.
+      const full = { data: img.data, width: img.width, height: img.height };
+      const colour = isColourFrame(full);
+      if (colour) this.stats.framesColour++;
+      const mix = colour ? estimateColourMix(full) : null;
+      const unmixed = mix ? splitChannels(full, mix) : null;
+      let raw: ScanFrame[] | null = null;
+      const rawChannel = (c: number) => (raw ??= splitChannels(full))[c]!;
+      // Per channel: the unmixed image first, then the raw channel (built only if needed).
+      const attempts: (() => ScanFrame)[][] = colour
+        ? [0, 1, 2].map((c) => (unmixed ? [() => unmixed[c]!, () => rawChannel(c)] : [() => rawChannel(c)]))
+        : [[() => full]];
+      let sawCode = false, accepted = 0;
+      for (const tries of attempts) {
+        for (const part of tries) {
+          let saw = false;
+          const res = await this.chain.decode(part(), (hit) => {
+            saw = true;
+            return acceptHit(hit);
+          });
+          sawCode ||= saw;
+          if (res) {
+            accepted++;
+            this.stats.packets++;
+            this.stats.lastDecoder = res.decoderId;
+            if (res.hit.version) this.stats.lastVersion = res.hit.version;
+            if (this.running) this.onPacket(res.value, res.decoderId);
+            break;
+          }
+          if (saw) this.stats.foreign++;
+        }
+      }
       if (sawCode) this.stats.framesWithCode++;
-      const found = !!res || sawCode;
+      const found = accepted > 0 || sawCode;
       if (loc) this.crop.locatedMisses = found ? 0 : this.crop.locatedMisses + 1;
       else this.crop.fallbackMisses = found ? 0 : this.crop.fallbackMisses + 1;
-      if (res) {
-        this.stats.packets++;
-        this.stats.lastDecoder = res.decoderId;
-        if (res.hit.version) this.stats.lastVersion = res.hit.version;
-        if (this.running) this.onPacket(res.value, res.decoderId);
-      } else if (sawCode) {
-        this.stats.foreign++;
-      }
       return true;
     } catch {
       /* a failed frame is just a missed frame */

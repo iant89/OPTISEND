@@ -54,7 +54,7 @@ test('the same packet renders with a different mask each pass and decodes to ide
       assert.deepEqual([...pkt!], [...expected], `${transport} pass ${pass}`);
     }
     assert.equal(masks.size, 8, `${transport}: all masks used across 8 passes`);
-    assert.ok(r.has(ref, 9), 'pass 9 reuses pass 1\'s mask (and its cached render)');
+    assert.ok(r.has([ref], 9), 'pass 9 reuses pass 1\'s mask (and its cached render)');
   }
 });
 
