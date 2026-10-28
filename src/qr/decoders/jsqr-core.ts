@@ -1,5 +1,6 @@
 /** Thin, synchronous wrapper around the vendored jsQR (usable in workers and tests). */
 import jsQR from '../../vendor/jsqr/jsQR.cjs';
+import type { QRCode } from '../../vendor/jsqr/jsQR.cjs';
 import type { ScanFrame, ScanHit } from './types.ts';
 
 export interface JsQrOptions {
@@ -13,10 +14,14 @@ export interface JsQrOptions {
 }
 
 export function decodeWithJsQr(frame: ScanFrame, opts: JsQrOptions = { smooth: true }): ScanHit | null {
-  const data = opts.smooth ? smoothLuma(frame) : frame.data;
   // OptiSend codes are always dark-on-light: skipping the inverted pass halves the work.
-  const r = jsQR(data, frame.width, frame.height, { inversionAttempts: 'dontInvert' });
-  if (!r) return null;
+  const r = opts.smooth
+    ? jsQR.luminance(smoothLumaPlane(frame), frame.width, frame.height, { inversionAttempts: 'dontInvert' })
+    : jsQR(frame.data, frame.width, frame.height, { inversionAttempts: 'dontInvert' });
+  return r ? toHit(r) : null;
+}
+
+function toHit(r: QRCode): ScanHit {
   const l = r.location;
   return {
     text: r.data,
@@ -26,8 +31,11 @@ export function decodeWithJsQr(frame: ScanFrame, opts: JsQrOptions = { smooth: t
   };
 }
 
-/** Grayscale + separable 3×3 box blur, returned as RGBA (R=G=B). O(pixels). */
-export function smoothLuma(frame: ScanFrame): Uint8ClampedArray {
+/**
+ * Luminance + separable 3×3 box blur → one byte per pixel (the input to
+ * jsQR.luminance, which skips jsQR's own RGBA→grey pass). O(pixels).
+ */
+export function smoothLumaPlane(frame: ScanFrame): Uint8ClampedArray {
   const { width: w, height: h, data } = frame;
   const n = w * h;
   const g = new Uint16Array(n);
@@ -41,17 +49,23 @@ export function smoothLuma(frame: ScanFrame): Uint8ClampedArray {
       t[row + x] = g[row + l]! + g[row + x]! + g[row + r]!;
     }
   }
-  const out = new Uint8ClampedArray(n * 4);
+  const out = new Uint8ClampedArray(n);
   for (let y = 0; y < h; y++) {
     const up = (y > 0 ? y - 1 : y) * w;
     const mid = y * w;
     const dn = (y < h - 1 ? y + 1 : y) * w;
-    for (let x = 0; x < w; x++) {
-      const v = ((t[up + x]! + t[mid + x]! + t[dn + x]!) * 7282) >> 16; // ≈ /9
-      const k = (mid + x) * 4;
-      out[k] = out[k + 1] = out[k + 2] = v;
-      out[k + 3] = 255;
-    }
+    for (let x = 0; x < w; x++) out[mid + x] = ((t[up + x]! + t[mid + x]! + t[dn + x]!) * 7282) >> 16; // ≈ /9
+  }
+  return out;
+}
+
+/** Same smoothing, expanded back to RGBA (R=G=B) — for tools that need an image. */
+export function smoothLuma(frame: ScanFrame): Uint8ClampedArray {
+  const plane = smoothLumaPlane(frame);
+  const out = new Uint8ClampedArray(plane.length * 4);
+  for (let i = 0, k = 0; i < plane.length; i++, k += 4) {
+    out[k] = out[k + 1] = out[k + 2] = plane[i]!;
+    out[k + 3] = 255;
   }
   return out;
 }

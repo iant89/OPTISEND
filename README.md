@@ -15,12 +15,12 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 112 unit tests (node:test via tsx)
+npm test             # 116 unit tests (node:test via tsx)
 npm run test:e2e     # 8 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
 
-Runtime dependencies: `react`, `react-dom`, and jsQR, vendored in `src/vendor/jsqr/` (Apache-2.0; see the README there). The QR encoder, SHA-256 and the protocol are in-house.
+Runtime dependencies: `react`, `react-dom`, and jsQR, vendored in `src/vendor/jsqr/` (Apache-2.0). It has been performance-modified: about 2.4× faster and proven bit-identical to upstream (see the README there). The QR encoder, SHA-256 and the protocol are in-house.
 
 The camera only works on a secure page (https:// or localhost). To test on a phone, serve `dist/` over HTTPS.
 

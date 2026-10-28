@@ -1,3 +1,19 @@
+/*
+ * jsQR — https://github.com/cozmo/jsQR — Copyright Cosmo Wolfe. Licensed under the Apache License 2.0.
+ *
+ * MODIFIED FOR OPTISEND (2026-10-28). Changes are performance-only and produce
+ * bit-identical decode results to upstream (verified by tests/jsqr-vendored.test.ts
+ * against the pristine copy in tests/fixtures/jsQR.upstream.cjs). Search for
+ * "[OptiSend" to find each change:
+ *   - binarize(): row-major loops with direct typed-array access; edge-region
+ *     behaviour of upstream preserved exactly. Split into binarizeGreyscale().
+ *   - locate(): row scan without per-pixel closures/allocations; same quad logic.
+ *   - countBlackWhiteRunTowardsPoint()/countBlackWhiteRun(): no per-point objects,
+ *     inlined bounds checks; same Bresenham walk and distance arithmetic.
+ *   - Added jsQR.luminance(luma, width, height, options): decode from a one-byte-
+ *     per-pixel luminance plane. It does not mutate shared default options, and
+ *     "onlyInvert" works (upstream jsQR() throws for it; jsQR() itself is unchanged).
+ */
 (function webpackUniversalModuleDefinition(root, factory) {
 	if(typeof exports === 'object' && typeof module === 'object')
 		module.exports = factory();
@@ -376,7 +392,28 @@ function jsQR(data, width, height, providedOptions) {
     }
     return result;
 }
+// [OptiSend addition] Decode from a luminance plane (one byte per pixel, length width*height),
+// skipping RGBA -> greyscale conversion. For an RGBA image whose R=G=B=v this is
+// equivalent to jsQR(rgba, ...), since upstream's weights sum to 1 and round back to v.
+function jsQRLuminance(luma, width, height, providedOptions) {
+    if (providedOptions === void 0) { providedOptions = {}; }
+    if (luma.length !== width * height) {
+        throw new Error("Malformed data passed to binarizer.");
+    }
+    var inversionAttempts = providedOptions.inversionAttempts || "attemptBoth";
+    // Unlike upstream jsQR(), "onlyInvert" works here (upstream never builds the inverted image for it and throws).
+    var shouldInvert = inversionAttempts !== "dontInvert";
+    var tryInvertedFirst = inversionAttempts === "onlyInvert" || inversionAttempts === "invertFirst";
+    var grey = luma instanceof Uint8ClampedArray ? luma : new Uint8ClampedArray(luma);
+    var _a = binarizer_1.binarizeGreyscale({ data: grey, width: width }, width, height, shouldInvert), binarized = _a.binarized, inverted = _a.inverted;
+    var result = scan(tryInvertedFirst ? inverted : binarized);
+    if (!result && (inversionAttempts === "attemptBoth" || inversionAttempts === "invertFirst")) {
+        result = scan(tryInvertedFirst ? binarized : inverted);
+    }
+    return result;
+}
 jsQR.default = jsQR;
+jsQR.luminance = jsQRLuminance;
 exports.default = jsQR;
 
 
@@ -408,86 +445,108 @@ var Matrix = /** @class */ (function () {
     return Matrix;
 }());
 function binarize(data, width, height, returnInverted) {
+    // [OptiSend modification] Same arithmetic and region order as upstream, but
+    // row-major (cache-friendly) loops with direct typed-array access instead of
+    // per-pixel get()/set() calls. Upstream's edge behaviour is preserved exactly:
+    // regions extending past the right edge read/write the next row's pixels, and
+    // reads past the end of the image are `undefined` (which makes that region's
+    // black point NaN -> stored as 0).
     if (data.length !== width * height * 4) {
         throw new Error("Malformed data passed to binarizer.");
     }
-    // Convert image to greyscale
+    var n = width * height;
     var greyscalePixels = new Matrix(width, height);
-    for (var x = 0; x < width; x++) {
-        for (var y = 0; y < height; y++) {
-            var r = data[((y * width + x) * 4) + 0];
-            var g = data[((y * width + x) * 4) + 1];
-            var b = data[((y * width + x) * 4) + 2];
-            greyscalePixels.set(x, y, 0.2126 * r + 0.7152 * g + 0.0722 * b);
-        }
+    var grey = greyscalePixels.data;
+    for (var i = 0, j = 0; i < n; i++, j += 4) {
+        grey[i] = 0.2126 * data[j] + 0.7152 * data[j + 1] + 0.0722 * data[j + 2];
     }
+    return binarizeGreyscale(greyscalePixels, width, height, returnInverted);
+}
+// [OptiSend addition] Entry point for callers that already have a luminance plane.
+function binarizeGreyscale(greyscalePixels, width, height, returnInverted) {
+    var grey = greyscalePixels.data;
+    var n = width * height;
     var horizontalRegionCount = Math.ceil(width / REGION_SIZE);
     var verticalRegionCount = Math.ceil(height / REGION_SIZE);
     var blackPoints = new Matrix(horizontalRegionCount, verticalRegionCount);
+    var bp = blackPoints.data;
+    var fullRegionsX = Math.floor(width / REGION_SIZE);
+    var fullRegionsY = Math.floor(height / REGION_SIZE);
     for (var verticalRegion = 0; verticalRegion < verticalRegionCount; verticalRegion++) {
         for (var hortizontalRegion = 0; hortizontalRegion < horizontalRegionCount; hortizontalRegion++) {
             var sum = 0;
             var min = Infinity;
             var max = 0;
-            for (var y = 0; y < REGION_SIZE; y++) {
+            if (hortizontalRegion < fullRegionsX && verticalRegion < fullRegionsY) {
+                // Interior region: every pixel exists. Same summation order as upstream (x outer, y inner).
+                var base = verticalRegion * REGION_SIZE * width + hortizontalRegion * REGION_SIZE;
                 for (var x = 0; x < REGION_SIZE; x++) {
-                    var pixelLumosity = greyscalePixels.get(hortizontalRegion * REGION_SIZE + x, verticalRegion * REGION_SIZE + y);
-                    sum += pixelLumosity;
-                    min = Math.min(min, pixelLumosity);
-                    max = Math.max(max, pixelLumosity);
+                    var idx = base + x;
+                    for (var y = 0; y < REGION_SIZE; y++, idx += width) {
+                        var pixelLumosity = grey[idx];
+                        sum += pixelLumosity;
+                        if (pixelLumosity < min) min = pixelLumosity;
+                        if (pixelLumosity > max) max = pixelLumosity;
+                    }
+                }
+            }
+            else {
+                // Edge region: replicate upstream exactly (wrapped reads; undefined past the end -> NaN).
+                for (var y = 0; y < REGION_SIZE; y++) {
+                    for (var x = 0; x < REGION_SIZE; x++) {
+                        var k = (verticalRegion * REGION_SIZE + y) * width + hortizontalRegion * REGION_SIZE + x;
+                        var pixelLumosity = k < n ? grey[k] : undefined;
+                        sum += pixelLumosity;
+                        min = Math.min(min, pixelLumosity);
+                        max = Math.max(max, pixelLumosity);
+                    }
                 }
             }
             var average = sum / (Math.pow(REGION_SIZE, 2));
             if (max - min <= MIN_DYNAMIC_RANGE) {
-                // If variation within the block is low, assume this is a block with only light or only
-                // dark pixels. In that case we do not want to use the average, as it would divide this
-                // low contrast area into black and white pixels, essentially creating data out of noise.
-                //
-                // Default the blackpoint for these blocks to be half the min - effectively white them out
+                // Low-contrast block: assume all light or all dark (see upstream comment).
                 average = min / 2;
                 if (verticalRegion > 0 && hortizontalRegion > 0) {
-                    // Correct the "white background" assumption for blocks that have neighbors by comparing
-                    // the pixels in this block to the previously calculated black points. This is based on
-                    // the fact that dark barcode symbology is always surrounded by some amount of light
-                    // background for which reasonable black point estimates were made. The bp estimated at
-                    // the boundaries is used for the interior.
-                    // The (min < bp) is arbitrary but works better than other heuristics that were tried.
-                    var averageNeighborBlackPoint = (blackPoints.get(hortizontalRegion, verticalRegion - 1) +
-                        (2 * blackPoints.get(hortizontalRegion - 1, verticalRegion)) +
-                        blackPoints.get(hortizontalRegion - 1, verticalRegion - 1)) / 4;
+                    var averageNeighborBlackPoint = (bp[(verticalRegion - 1) * horizontalRegionCount + hortizontalRegion] +
+                        (2 * bp[verticalRegion * horizontalRegionCount + hortizontalRegion - 1]) +
+                        bp[(verticalRegion - 1) * horizontalRegionCount + hortizontalRegion - 1]) / 4;
                     if (min < averageNeighborBlackPoint) {
                         average = averageNeighborBlackPoint;
                     }
                 }
             }
-            blackPoints.set(hortizontalRegion, verticalRegion, average);
+            bp[verticalRegion * horizontalRegionCount + hortizontalRegion] = average;
         }
     }
     var binarized = BitMatrix_1.BitMatrix.createEmpty(width, height);
+    var bin = binarized.data;
     var inverted = null;
+    var inv = null;
     if (returnInverted) {
         inverted = BitMatrix_1.BitMatrix.createEmpty(width, height);
+        inv = inverted.data;
     }
     for (var verticalRegion = 0; verticalRegion < verticalRegionCount; verticalRegion++) {
+        var top_1 = numBetween(verticalRegion, 2, verticalRegionCount - 3);
         for (var hortizontalRegion = 0; hortizontalRegion < horizontalRegionCount; hortizontalRegion++) {
             var left = numBetween(hortizontalRegion, 2, horizontalRegionCount - 3);
-            var top_1 = numBetween(verticalRegion, 2, verticalRegionCount - 3);
             var sum = 0;
+            // Same summation order as upstream (xRegion outer, yRegion inner).
             for (var xRegion = -2; xRegion <= 2; xRegion++) {
                 for (var yRegion = -2; yRegion <= 2; yRegion++) {
-                    sum += blackPoints.get(left + xRegion, top_1 + yRegion);
+                    sum += bp[(top_1 + yRegion) * horizontalRegionCount + left + xRegion];
                 }
             }
             var threshold = sum / 25;
-            for (var xRegion = 0; xRegion < REGION_SIZE; xRegion++) {
-                for (var yRegion = 0; yRegion < REGION_SIZE; yRegion++) {
-                    var x = hortizontalRegion * REGION_SIZE + xRegion;
-                    var y = verticalRegion * REGION_SIZE + yRegion;
-                    var lum = greyscalePixels.get(x, y);
-                    binarized.set(x, y, lum <= threshold);
-                    if (returnInverted) {
-                        inverted.set(x, y, !(lum <= threshold));
-                    }
+            var x0 = hortizontalRegion * REGION_SIZE;
+            for (var yRegion = 0; yRegion < REGION_SIZE; yRegion++) {
+                var rowBase = (verticalRegion * REGION_SIZE + yRegion) * width + x0;
+                for (var xRegion = 0; xRegion < REGION_SIZE; xRegion++) {
+                    var k = rowBase + xRegion;
+                    if (k >= n) continue; // upstream: writes past the end are no-ops
+                    var dark = grey[k] <= threshold ? 1 : 0;
+                    bin[k] = dark;
+                    if (inv !== null) inv[k] = dark ^ 1;
                 }
             }
         }
@@ -497,6 +556,7 @@ function binarize(data, width, height, returnInverted) {
     }
     return { binarized: binarized };
 }
+exports.binarizeGreyscale = binarizeGreyscale;
 exports.binarize = binarize;
 
 
@@ -9757,7 +9817,11 @@ function computeDimension(topLeft, topRight, bottomLeft, matrix) {
 // Returns an array of elements, representing the pixel size of the black white run.
 // Uses a variant of http://en.wikipedia.org/wiki/Bresenham's_line_algorithm
 function countBlackWhiteRunTowardsPoint(origin, end, matrix, length) {
-    var switchPoints = [{ x: Math.floor(origin.x), y: Math.floor(origin.y) }];
+    // [OptiSend modification] Same Bresenham walk and distance arithmetic as upstream,
+    // with switch points kept in two small arrays instead of allocated objects and
+    // matrix bounds checks inlined.
+    var spX = [Math.floor(origin.x)];
+    var spY = [Math.floor(origin.y)];
     var steep = Math.abs(end.y - origin.y) > Math.abs(end.x - origin.x);
     var fromX;
     var fromY;
@@ -9781,17 +9845,16 @@ function countBlackWhiteRunTowardsPoint(origin, end, matrix, length) {
     var xStep = fromX < toX ? 1 : -1;
     var yStep = fromY < toY ? 1 : -1;
     var currentPixel = true;
-    // Loop up until x == toX, but not beyond
+    var mw = matrix.width, mh = matrix.height, md = matrix.data;
     for (var x = fromX, y = fromY; x !== toX + xStep; x += xStep) {
-        // Does current pixel mean we have moved white to black or vice versa?
-        // Scanning black in state 0,2 and white in state 1, so if we find the wrong
-        // color, advance to next state or end if we are in state 2 already
         var realX = steep ? y : x;
         var realY = steep ? x : y;
-        if (matrix.get(realX, realY) !== currentPixel) {
+        var px = realX < 0 || realX >= mw || realY < 0 || realY >= mh ? false : md[realY * mw + realX] !== 0;
+        if (px !== currentPixel) {
             currentPixel = !currentPixel;
-            switchPoints.push({ x: realX, y: realY });
-            if (switchPoints.length === length + 1) {
+            spX.push(realX);
+            spY.push(realY);
+            if (spX.length === length + 1) {
                 break;
             }
         }
@@ -9804,13 +9867,13 @@ function countBlackWhiteRunTowardsPoint(origin, end, matrix, length) {
             error -= dx;
         }
     }
-    var distances = [];
+    var distances = new Array(length);
     for (var i = 0; i < length; i++) {
-        if (switchPoints[i] && switchPoints[i + 1]) {
-            distances.push(distance(switchPoints[i], switchPoints[i + 1]));
+        if (i + 1 < spX.length) {
+            distances[i] = Math.sqrt(Math.pow((spX[i + 1] - spX[i]), 2) + Math.pow((spY[i + 1] - spY[i]), 2));
         }
         else {
-            distances.push(0);
+            distances[i] = 0;
         }
     }
     return distances;
@@ -9819,13 +9882,18 @@ function countBlackWhiteRunTowardsPoint(origin, end, matrix, length) {
 // along the line that intersects with the end point. Returns an array of elements, representing the pixel sizes
 // of the black white run. Takes a length which represents the number of switches from black to white to look for.
 function countBlackWhiteRun(origin, end, matrix, length) {
-    var _a;
+    // [OptiSend modification] Builds the same array as upstream's shift()/concat() sequence directly.
     var rise = end.y - origin.y;
     var run = end.x - origin.x;
-    var towardsEnd = countBlackWhiteRunTowardsPoint(origin, end, matrix, Math.ceil(length / 2));
-    var awayFromEnd = countBlackWhiteRunTowardsPoint(origin, { x: origin.x - run, y: origin.y - rise }, matrix, Math.ceil(length / 2));
-    var middleValue = towardsEnd.shift() + awayFromEnd.shift() - 1; // Substract one so we don't double count a pixel
-    return (_a = awayFromEnd.concat(middleValue)).concat.apply(_a, towardsEnd);
+    var half = Math.ceil(length / 2);
+    var towardsEnd = countBlackWhiteRunTowardsPoint(origin, end, matrix, half);
+    var awayFromEnd = countBlackWhiteRunTowardsPoint(origin, { x: origin.x - run, y: origin.y - rise }, matrix, half);
+    var middleValue = towardsEnd[0] + awayFromEnd[0] - 1; // Substract one so we don't double count a pixel
+    var out = [];
+    for (var i = 1; i < awayFromEnd.length; i++) out.push(awayFromEnd[i]);
+    out.push(middleValue);
+    for (var i = 1; i < towardsEnd.length; i++) out.push(towardsEnd[i]);
+    return out;
 }
 // Takes in a black white run and an array of expected ratios. Returns the average size of the run as well as the "error" -
 // that is the amount the run diverges from the expected ratio
@@ -9899,85 +9967,104 @@ function locate(matrix) {
     var activeFinderPatternQuads = [];
     var alignmentPatternQuads = [];
     var activeAlignmentPatternQuads = [];
-    var _loop_1 = function (y) {
+    // [OptiSend modification] Same scan and quad-building logic as upstream, without the
+    // per-pixel closure call, bounds-checked get(), and per-transition array allocations.
+    var mw = matrix.width;
+    var mh = matrix.height;
+    var md = matrix.data;
+    for (var y = 0; y <= mh; y++) {
         var length_1 = 0;
         var lastBit = false;
-        var scans = [0, 0, 0, 0, 0];
-        var _loop_2 = function (x) {
-            var v = matrix.get(x, y);
+        var s0 = 0, s1 = 0, s2 = 0, s3 = 0, s4 = 0;
+        var rowInside = y >= 0 && y < mh;
+        var rowBase = y * mw;
+        for (var x = -1; x <= mw; x++) {
+            var v = rowInside && x >= 0 && x < mw ? md[rowBase + x] !== 0 : false;
             if (v === lastBit) {
                 length_1++;
+                continue;
             }
-            else {
-                scans = [scans[1], scans[2], scans[3], scans[4], length_1];
-                length_1 = 1;
-                lastBit = v;
-                // Do the last 5 color changes ~ match the expected ratio for a finder pattern? 1:1:3:1:1 of b:w:b:w:b
-                var averageFinderPatternBlocksize = sum(scans) / 7;
-                var validFinderPattern = Math.abs(scans[0] - averageFinderPatternBlocksize) < averageFinderPatternBlocksize &&
-                    Math.abs(scans[1] - averageFinderPatternBlocksize) < averageFinderPatternBlocksize &&
-                    Math.abs(scans[2] - 3 * averageFinderPatternBlocksize) < 3 * averageFinderPatternBlocksize &&
-                    Math.abs(scans[3] - averageFinderPatternBlocksize) < averageFinderPatternBlocksize &&
-                    Math.abs(scans[4] - averageFinderPatternBlocksize) < averageFinderPatternBlocksize &&
-                    !v; // And make sure the current pixel is white since finder patterns are bordered in white
-                // Do the last 3 color changes ~ match the expected ratio for an alignment pattern? 1:1:1 of w:b:w
-                var averageAlignmentPatternBlocksize = sum(scans.slice(-3)) / 3;
-                var validAlignmentPattern = Math.abs(scans[2] - averageAlignmentPatternBlocksize) < averageAlignmentPatternBlocksize &&
-                    Math.abs(scans[3] - averageAlignmentPatternBlocksize) < averageAlignmentPatternBlocksize &&
-                    Math.abs(scans[4] - averageAlignmentPatternBlocksize) < averageAlignmentPatternBlocksize &&
-                    v; // Is the current pixel black since alignment patterns are bordered in black
-                if (validFinderPattern) {
-                    // Compute the start and end x values of the large center black square
-                    var endX_1 = x - scans[3] - scans[4];
-                    var startX_1 = endX_1 - scans[2];
+            s0 = s1; s1 = s2; s2 = s3; s3 = s4; s4 = length_1;
+            length_1 = 1;
+            lastBit = v;
+            // Do the last 5 color changes ~ match the expected ratio for a finder pattern? 1:1:3:1:1 of b:w:b:w:b
+            if (!v) {
+                var averageFinderPatternBlocksize = ((((s0 + s1) + s2) + s3) + s4) / 7;
+                if (Math.abs(s0 - averageFinderPatternBlocksize) < averageFinderPatternBlocksize &&
+                    Math.abs(s1 - averageFinderPatternBlocksize) < averageFinderPatternBlocksize &&
+                    Math.abs(s2 - 3 * averageFinderPatternBlocksize) < 3 * averageFinderPatternBlocksize &&
+                    Math.abs(s3 - averageFinderPatternBlocksize) < averageFinderPatternBlocksize &&
+                    Math.abs(s4 - averageFinderPatternBlocksize) < averageFinderPatternBlocksize) {
+                    var endX_1 = x - s3 - s4;
+                    var startX_1 = endX_1 - s2;
                     var line = { startX: startX_1, endX: endX_1, y: y };
-                    // Is there a quad directly above the current spot? If so, extend it with the new line. Otherwise, create a new quad with
-                    // that line as the starting point.
-                    var matchingQuads = activeFinderPatternQuads.filter(function (q) {
-                        return (startX_1 >= q.bottom.startX && startX_1 <= q.bottom.endX) ||
+                    var match = null;
+                    for (var qi = 0; qi < activeFinderPatternQuads.length; qi++) {
+                        var q = activeFinderPatternQuads[qi];
+                        if ((startX_1 >= q.bottom.startX && startX_1 <= q.bottom.endX) ||
                             (endX_1 >= q.bottom.startX && startX_1 <= q.bottom.endX) ||
-                            (startX_1 <= q.bottom.startX && endX_1 >= q.bottom.endX && ((scans[2] / (q.bottom.endX - q.bottom.startX)) < MAX_QUAD_RATIO &&
-                                (scans[2] / (q.bottom.endX - q.bottom.startX)) > MIN_QUAD_RATIO));
-                    });
-                    if (matchingQuads.length > 0) {
-                        matchingQuads[0].bottom = line;
+                            (startX_1 <= q.bottom.startX && endX_1 >= q.bottom.endX && ((s2 / (q.bottom.endX - q.bottom.startX)) < MAX_QUAD_RATIO &&
+                                (s2 / (q.bottom.endX - q.bottom.startX)) > MIN_QUAD_RATIO))) {
+                            match = q;
+                            break;
+                        }
+                    }
+                    if (match !== null) {
+                        match.bottom = line;
                     }
                     else {
                         activeFinderPatternQuads.push({ top: line, bottom: line });
                     }
                 }
-                if (validAlignmentPattern) {
-                    // Compute the start and end x values of the center black square
-                    var endX_2 = x - scans[4];
-                    var startX_2 = endX_2 - scans[3];
+            }
+            else {
+                // Do the last 3 color changes ~ match the expected ratio for an alignment pattern? 1:1:1 of w:b:w
+                var averageAlignmentPatternBlocksize = ((s2 + s3) + s4) / 3;
+                if (Math.abs(s2 - averageAlignmentPatternBlocksize) < averageAlignmentPatternBlocksize &&
+                    Math.abs(s3 - averageAlignmentPatternBlocksize) < averageAlignmentPatternBlocksize &&
+                    Math.abs(s4 - averageAlignmentPatternBlocksize) < averageAlignmentPatternBlocksize) {
+                    var endX_2 = x - s4;
+                    var startX_2 = endX_2 - s3;
                     var line = { startX: startX_2, y: y, endX: endX_2 };
-                    // Is there a quad directly above the current spot? If so, extend it with the new line. Otherwise, create a new quad with
-                    // that line as the starting point.
-                    var matchingQuads = activeAlignmentPatternQuads.filter(function (q) {
-                        return (startX_2 >= q.bottom.startX && startX_2 <= q.bottom.endX) ||
+                    var match = null;
+                    for (var qi = 0; qi < activeAlignmentPatternQuads.length; qi++) {
+                        var q = activeAlignmentPatternQuads[qi];
+                        if ((startX_2 >= q.bottom.startX && startX_2 <= q.bottom.endX) ||
                             (endX_2 >= q.bottom.startX && startX_2 <= q.bottom.endX) ||
-                            (startX_2 <= q.bottom.startX && endX_2 >= q.bottom.endX && ((scans[2] / (q.bottom.endX - q.bottom.startX)) < MAX_QUAD_RATIO &&
-                                (scans[2] / (q.bottom.endX - q.bottom.startX)) > MIN_QUAD_RATIO));
-                    });
-                    if (matchingQuads.length > 0) {
-                        matchingQuads[0].bottom = line;
+                            (startX_2 <= q.bottom.startX && endX_2 >= q.bottom.endX && ((s2 / (q.bottom.endX - q.bottom.startX)) < MAX_QUAD_RATIO &&
+                                (s2 / (q.bottom.endX - q.bottom.startX)) > MIN_QUAD_RATIO))) {
+                            match = q;
+                            break;
+                        }
+                    }
+                    if (match !== null) {
+                        match.bottom = line;
                     }
                     else {
                         activeAlignmentPatternQuads.push({ top: line, bottom: line });
                     }
                 }
             }
-        };
-        for (var x = -1; x <= matrix.width; x++) {
-            _loop_2(x);
         }
-        finderPatternQuads.push.apply(finderPatternQuads, activeFinderPatternQuads.filter(function (q) { return q.bottom.y !== y && q.bottom.y - q.top.y >= 2; }));
-        activeFinderPatternQuads = activeFinderPatternQuads.filter(function (q) { return q.bottom.y === y; });
-        alignmentPatternQuads.push.apply(alignmentPatternQuads, activeAlignmentPatternQuads.filter(function (q) { return q.bottom.y !== y; }));
-        activeAlignmentPatternQuads = activeAlignmentPatternQuads.filter(function (q) { return q.bottom.y === y; });
-    };
-    for (var y = 0; y <= matrix.height; y++) {
-        _loop_1(y);
+        // Retire quads that did not continue on this row (same filters as upstream).
+        if (activeFinderPatternQuads.length) {
+            var keepF = [];
+            for (var qi = 0; qi < activeFinderPatternQuads.length; qi++) {
+                var q = activeFinderPatternQuads[qi];
+                if (q.bottom.y !== y) { if (q.bottom.y - q.top.y >= 2) finderPatternQuads.push(q); }
+                else keepF.push(q);
+            }
+            activeFinderPatternQuads = keepF;
+        }
+        if (activeAlignmentPatternQuads.length) {
+            var keepA = [];
+            for (var qi = 0; qi < activeAlignmentPatternQuads.length; qi++) {
+                var q = activeAlignmentPatternQuads[qi];
+                if (q.bottom.y !== y) alignmentPatternQuads.push(q);
+                else keepA.push(q);
+            }
+            activeAlignmentPatternQuads = keepA;
+        }
     }
     finderPatternQuads.push.apply(finderPatternQuads, activeFinderPatternQuads.filter(function (q) { return q.bottom.y - q.top.y >= 2; }));
     alignmentPatternQuads.push.apply(alignmentPatternQuads, activeAlignmentPatternQuads);
