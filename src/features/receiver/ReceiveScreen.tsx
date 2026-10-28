@@ -84,7 +84,7 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
     })();
     return () => {
       disposed = true;
-      scannerRef.current?.stop();
+      scannerRef.current?.dispose();
       scannerRef.current = null;
       chainDispose?.();
       stopStream(stream);

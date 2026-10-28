@@ -105,3 +105,20 @@ test('unmixing recovers codes from a strongly crosstalked capture', async () => 
   // (Compare as a boolean: a failure must not make the test runner print a large object.)
   assert.equal(estimateColourMix(rasterize(codes[0]!, 2)) === null, true);
 });
+
+test('ColourSplitter: main-thread fallback splits like the worker would (unmixed, or raw when asked or when no fit)', async () => {
+  const { ColourSplitter } = await import('../src/qr/colour-splitter.ts');
+  const s = new ColourSplitter(false);
+  assert.equal(s.usingWorker, false);
+  const { codes } = await threeCodes('conservative', 'alphanumeric');
+  const frame = rasterRgb(codes, 2);
+  const expectRaw = splitChannels({ ...frame, data: new Uint8ClampedArray(frame.data) });
+  const unmixed = await s.split({ ...frame, data: new Uint8ClampedArray(frame.data) }, true);
+  assert.equal(unmixed.unmixed, true);
+  const raw = await s.split({ ...frame, data: new Uint8ClampedArray(frame.data) }, false);
+  assert.equal(raw.unmixed, false);
+  for (const c of [0, 1, 2] as const) assert.equal(Buffer.compare(Buffer.from(raw.channels[c].data), Buffer.from(expectRaw[c].data)), 0);
+  // A black-and-white frame has no colour fit: raw channels come back.
+  assert.equal((await s.split(rasterize(codes[0]!, 2), true)).unmixed, false);
+  s.dispose();
+});

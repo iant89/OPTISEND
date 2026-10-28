@@ -96,6 +96,12 @@ for (const colour of [false, true]) test(`sender app → simulated phone camera 
   // Every request (page and workers) must stay on the app's own server: no CDN for the ZXing WebAssembly.
   const requests: string[] = [];
   ctx.on('request', (r) => requests.push(r.url()));
+  // Main-thread responsiveness: record long tasks (≥ 50 ms) while receiving.
+  await ctx.addInitScript(() => {
+    const w = window as unknown as { __longTasks: number[] };
+    w.__longTasks = [];
+    try { new PerformanceObserver((l) => { for (const e of l.getEntries()) w.__longTasks.push(Math.round(e.duration)); }).observe({ type: 'longtask', buffered: true }); } catch { /* unsupported */ }
+  });
   await page.goto(server.url);
   await page.getByRole('button', { name: /Receive transfer/ }).click();
   await page.getByText('Receiving…').or(page.getByText('All files received and verified')).first().waitFor({ timeout: 60_000 });
@@ -131,7 +137,12 @@ for (const colour of [false, true]) test(`sender app → simulated phone camera 
   console.log(`# ${shots.length} codes filmed; receiver stats: ${diag}`);
   const scanInfo = await page.evaluate(() => document.querySelector('.receive details p.muted.small')?.textContent ?? '');
   console.log(`# scanner: ${scanInfo}`);
-  if (colour) assert.match(scanInfo, /[1-9][\d,]* colour frames/, 'the receiver split colour frames into channels');
+  const longTasks = await page.evaluate(() => (window as unknown as { __longTasks: number[] }).__longTasks);
+  console.log(`# main-thread long tasks (≥50 ms) during the session: ${longTasks.length}${longTasks.length ? ` (max ${Math.max(...longTasks)} ms, total ${longTasks.reduce((x, y) => x + y, 0)} ms)` : ''}`);
+  if (colour) {
+    assert.match(scanInfo, /[1-9][\d,]* colour frames/, 'the receiver split colour frames into channels');
+    assert.ok(requests.some((u) => u.endsWith('/assets/colour.worker.js')), 'colour frames are split in the colour worker');
+  }
   else assert.doesNotMatch(scanInfo, /colour frames/, 'black-and-white frames are never treated as colour');
 
   // Automatic mode decoded with ZXing (WebAssembly) in its worker, loaded from the app itself.

@@ -16,7 +16,7 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 160 unit tests (node:test via tsx)
+npm test             # 161 unit tests (node:test via tsx)
 npm run test:e2e     # 17 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
@@ -141,6 +141,7 @@ The receiver needs no setting (`src/qr/color.ts`):
 - **Detection:** it checks the share of saturated pixels after stretching each channel to its own range, so a colour cast on a black-and-white code doesn't count as colour.
 - **Unmixing:** it undoes the camera's colour mixing, estimated from the frame itself. The eight module colours (each channel dark or light) form eight clusters; k-means finds them, the structure of the colour cube labels them, and the inverse mix is applied.
 - **Decoding:** each channel is decoded as a grey image. A channel that fails after unmixing is retried raw.
+- **Off the main thread:** the colour fit and channel split (about 20–60 ms per colour frame) run in `colour.worker` (`src/qr/colour-splitter.ts`); the frame is transferred, not copied. Only the cheap colour check (about 1 ms) runs on the main thread. If the worker can't start, the split runs on the main thread. In the browser colour test, main-thread long tasks (≥ 50 ms) went from 9 (529 ms in total) to none.
 
 Measured in simulation (`tests/color-sim.test.ts`; the camera model adds 20% crosstalk, ±15% white balance, Bayer sampling and 4:2:0 chroma), aimed, ZXing:
 
@@ -155,7 +156,6 @@ In the browser test (`e2e/receiver.test.ts`), the same two files took 6 filmed f
 
 **Limits:**
 - The camera model is an assumption: real screens, cameras, auto white balance and video compression decide. Test on real device pairs, with Compare-all diagnostics and the "colour frames" counter.
-- Colour unmixing runs on the main thread, about 20–60 ms per colour frame on this machine. It should move into the decoder worker.
 - Older OptiSend receivers read only the black-and-white file-list frames.
 
 ### Default transport is text-safe (Base45)

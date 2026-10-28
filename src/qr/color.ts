@@ -232,3 +232,12 @@ function invert3(m: number[][]): number[][] | null {
     [C / det, -(a! * h! - b! * g!) / det, (a! * e! - b! * d!) / det],
   ];
 }
+
+/**
+ * A colour frame's three channels: unmixed when `unmix` is set and the colour
+ * fit succeeds, else raw. Shared by the colour worker and its main-thread fallback.
+ */
+export function splitColourFrame(f: ScanFrame, unmix: boolean): { channels: [ScanFrame, ScanFrame, ScanFrame]; unmixed: boolean } {
+  const mix = unmix ? estimateColourMix(f) : null;
+  return { channels: splitChannels(f, mix), unmixed: !!mix };
+}

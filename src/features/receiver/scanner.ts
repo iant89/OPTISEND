@@ -11,7 +11,8 @@ import { unframeScan } from '../../protocol/transport.ts';
 import { ProtocolError } from '../../protocol/errors.ts';
 import { locatorSide, regionForBox, scanRegion, targetScanSide, type ScanRegion } from './region.ts';
 import { locateQr } from '../../qr/detect/finder.ts';
-import { estimateColourMix, isColourFrame, splitChannels } from '../../qr/color.ts';
+import { isColourFrame } from '../../qr/color.ts';
+import { ColourSplitter } from '../../qr/colour-splitter.ts';
 
 export interface ScannerOptions {
   /** Average upper bound on decode attempts per second. */
@@ -129,6 +130,8 @@ export class FrameScanner {
   private readonly maxFps: number;
   private readonly fraction: number;
   private readonly alternateGuide: boolean;
+  /** Colour-frame worker, started on the first colour frame. */
+  private splitter: ColourSplitter | null = null;
   private readonly crop: CropState = { locatedMisses: 0, unlocated: 0, fallbackMisses: 0 };
 
   constructor(
@@ -170,6 +173,13 @@ export class FrameScanner {
       this.handle = null;
     }
   }
+  /** Stop scanning and release workers. */
+  dispose(): void {
+    this.stop();
+    this.splitter?.dispose();
+    this.splitter = null;
+  }
+
 
   private schedule(): void {
     if (!this.running) return;
@@ -234,25 +244,27 @@ export class FrameScanner {
       while (this.recent.length && now - this.recent[0]! > 2000) this.recent.shift();
       this.stats.fps = this.recent.length / 2;
 
-      // A colour frame carries three codes, one per channel: undo the camera's colour mixing
-      // (estimated from the frame itself) and decode each channel as a grey image. A channel
-      // that fails after unmixing is retried raw, in case the colour fit was off.
+      // A colour frame carries three codes, one per channel. The colour worker undoes the camera's
+      // colour mixing (estimated from the frame itself) and splits the channels; each is decoded
+      // as a grey image. A channel that fails after unmixing is retried raw.
       const full = { data: img.data, width: img.width, height: img.height };
       const colour = isColourFrame(full);
-      if (colour) this.stats.framesColour++;
-      const mix = colour ? estimateColourMix(full) : null;
-      const unmixed = mix ? splitChannels(full, mix) : null;
-      let raw: ScanFrame[] | null = null;
-      const rawChannel = (c: number) => (raw ??= splitChannels(full))[c]!;
-      // Per channel: the unmixed image first, then the raw channel (built only if needed).
-      const attempts: (() => ScanFrame)[][] = colour
-        ? [0, 1, 2].map((c) => (unmixed ? [() => unmixed[c]!, () => rawChannel(c)] : [() => rawChannel(c)]))
-        : [[() => full]];
+      let attempts: (() => Promise<ScanFrame>)[][] = [[async () => full]];
+      if (colour) {
+        this.stats.framesColour++;
+        this.splitter ??= new ColourSplitter();
+        const splitter = this.splitter;
+        const copy = { ...full, data: new Uint8ClampedArray(full.data) }; // kept for a raw split; `full` is transferred
+        const first = await splitter.split(full, true);
+        let raw: Promise<ScanFrame[]> | null = first.unmixed ? null : Promise.resolve(first.channels);
+        const rawChannel = async (c: number) => (await (raw ??= splitter.split(copy, false).then((r) => r.channels)))[c]!;
+        attempts = [0, 1, 2].map((c) => (first.unmixed ? [async () => first.channels[c]!, () => rawChannel(c)] : [() => rawChannel(c)]));
+      }
       let sawCode = false, accepted = 0;
       for (const tries of attempts) {
         for (const part of tries) {
           let saw = false;
-          const res = await this.chain.decode(part(), (hit) => {
+          const res = await this.chain.decode(await part(), (hit) => {
             saw = true;
             return acceptHit(hit);
           });

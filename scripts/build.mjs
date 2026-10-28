@@ -19,6 +19,7 @@ const options = {
     'hash.worker': 'src/workers/hash.worker.ts',
     'scan.worker': 'src/workers/scan.worker.ts',
     'zxing.worker': 'src/workers/zxing.worker.ts',
+    'colour.worker': 'src/workers/colour.worker.ts',
     styles: 'src/app/styles.css',
   },
   outdir,
