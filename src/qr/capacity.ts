@@ -121,8 +121,8 @@ function preset(id: PayloadPresetId, label: string, description: string, version
  */
 export const PAYLOAD_PRESETS: Readonly<Record<PayloadPresetId, PayloadPreset>> = Object.freeze({
   conservative: preset('conservative', 'Conservative', 'Version 15 · ECC M — large modules, scans reliably on most phones', 15, 'M', 'byte'),
-  balanced: preset('balanced', 'Balanced', 'Version 25 · ECC M — good throughput on a desktop display', 25, 'M', 'byte'),
-  'high-throughput': preset('high-throughput', 'High throughput', 'Version 40 · ECC L — maximum density, needs a sharp display and steady camera', 40, 'L', 'byte'),
+  balanced: preset('balanced', 'Balanced', 'Version 25 · ECC M — about 3× faster; needs a steady camera held close to the screen', 25, 'M', 'byte'),
+  'high-throughput': preset('high-throughput', 'High throughput', 'Version 40 · ECC L — experimental: phone cameras usually cannot read it yet', 40, 'L', 'byte'),
 });
 
 /** Validate a manual configuration (spec §5.2: never exceed the selected QR capacity). */

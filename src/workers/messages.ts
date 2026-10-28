@@ -12,3 +12,7 @@ export type QrRequest = { id: number; content: QrContent; ecc: EccLevel; minVers
 export type QrResponse =
   | { id: number; kind: 'done'; version: number; mask: number; size: number; modules: Uint8Array; ecc: EccLevel }
   | { id: number; kind: 'error'; message: string };
+
+import type { ScanHit } from '../qr/decoders/types.ts';
+export type ScanRequest = { id: number; data: Uint8ClampedArray; width: number; height: number };
+export type ScanResponse = { id: number; hit: ScanHit | null };

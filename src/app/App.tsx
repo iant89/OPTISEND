@@ -1,4 +1,9 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
+import { ReceiverEngine, type FileSnapshot } from '../protocol/receiver.ts';
+import { MemoryChunkStore } from '../protocol/chunk-store.ts';
+import { ReceiveScreen, type ReceiverPrefs } from '../features/receiver/ReceiveScreen.tsx';
+import { FileActions } from '../features/files/FileActions.tsx';
+import { useEngineSnapshot } from '../hooks/useEngineSnapshot.ts';
 import type { TransferPlan } from '../protocol/sender.ts';
 import { SendScreen, type QueuedFile } from '../features/sender/SendScreen.tsx';
 import { TransmitView, type TransmissionSummary } from '../features/sender/TransmitView.tsx';
@@ -13,6 +18,20 @@ type Screen =
   | { name: 'receive' };
 
 const SETTINGS_KEY = 'optisend.sender.settings.v1';
+const RX_PREFS_KEY = 'optisend.receiver.prefs.v1';
+
+function loadRxPrefs(): ReceiverPrefs {
+  const d: ReceiverPrefs = { decoderMode: 'auto', vibrate: false };
+  try {
+    const r = JSON.parse(localStorage.getItem(RX_PREFS_KEY) ?? 'null') as Partial<ReceiverPrefs> | null;
+    return {
+      decoderMode: r?.decoderMode && ['auto', 'jsqr', 'native', 'compare'].includes(r.decoderMode) ? r.decoderMode : d.decoderMode,
+      vibrate: typeof r?.vibrate === 'boolean' ? r.vibrate : d.vibrate,
+    };
+  } catch {
+    return d;
+  }
+}
 
 function loadSettings(): SenderSettings {
   try {
@@ -27,6 +46,14 @@ export function App() {
   const [screen, setScreen] = useState<Screen>({ name: 'home' });
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [settings, setSettings] = useState<SenderSettings>(loadSettings);
+  const [rxPrefs, setRxPrefs] = useState<ReceiverPrefs>(loadRxPrefs);
+  // One receiver engine for the app's lifetime: leaving the receive screen keeps
+  // partial transfers, so the user can resume (persistence arrives in Phase 4).
+  const engine = useMemo(() => new ReceiverEngine({ store: new MemoryChunkStore() }), []);
+
+  useEffect(() => {
+    try { localStorage.setItem(RX_PREFS_KEY, JSON.stringify(rxPrefs)); } catch { /* per-visit only */ }
+  }, [rxPrefs]);
 
   useEffect(() => {
     try { localStorage.setItem(SETTINGS_KEY, JSON.stringify(settings)); } catch { /* storage unavailable: settings are per-visit */ }
@@ -40,7 +67,7 @@ export function App() {
 
   switch (screen.name) {
     case 'home':
-      return <Home queued={queue.length} onSend={() => setScreen({ name: 'send' })} onReceive={() => setScreen({ name: 'receive' })} />;
+      return <Home engine={engine} queued={queue.length} onSend={() => setScreen({ name: 'send' })} onReceive={() => setScreen({ name: 'receive' })} />;
     case 'send':
       return (
         <SendScreen
@@ -64,12 +91,16 @@ export function App() {
         />
       );
     case 'receive':
-      return <ReceivePlaceholder onBack={() => setScreen({ name: 'home' })} />;
+      return <ReceiveScreen engine={engine} prefs={rxPrefs} setPrefs={setRxPrefs} onExit={() => setScreen({ name: 'home' })} />;
   }
 }
 
-function Home({ queued, onSend, onReceive }: { queued: number; onSend: () => void; onReceive: () => void }) {
+function Home({ engine, queued, onSend, onReceive }: { engine: ReceiverEngine; queued: number; onSend: () => void; onReceive: () => void }) {
   const [storage, setStorage] = useState<string | null>(null);
+  const { sessions } = useEngineSnapshot(engine, 500);
+  const all = sessions.flatMap((s) => s.files);
+  const received = all.filter((f) => f.status === 'verified');
+  const incomplete = all.filter((f) => f.status !== 'verified');
   useEffect(() => {
     navigator.storage?.estimate?.().then(
       (e) => { if (e.quota) setStorage(`${formatBytes(e.usage ?? 0)} used of ${formatBytes(e.quota)} available`); },
@@ -94,13 +125,32 @@ function Home({ queued, onSend, onReceive }: { queued: number; onSend: () => voi
           <span className="action-sub muted">Scan codes with this device's camera</span>
         </button>
       </div>
-      <section className="card">
-        <h2>Received files</h2>
-        <p className="muted">Nothing received yet.</p>
+      <section className="card" aria-labelledby="rx-h">
+        <h2 id="rx-h">Received files</h2>
+        {received.length === 0 ? <p className="muted">Nothing received yet.</p> : (
+          <ul className="rx-files">
+            {received.map((f) => <ReceivedRow key={`${f.sessionId}/${f.fileId}`} engine={engine} f={f} />)}
+          </ul>
+        )}
+        {received.length > 0 && <p className="muted small">Received files are kept only while this page is open. Save the ones you need.</p>}
       </section>
-      <section className="card">
-        <h2>Incomplete transfers</h2>
-        <p className="muted">None.</p>
+      <section className="card" aria-labelledby="inc-h">
+        <h2 id="inc-h">Incomplete transfers</h2>
+        {incomplete.length === 0 ? <p className="muted">None.</p> : (
+          <>
+            <ul className="rx-files">
+              {incomplete.map((f) => (
+                <li key={`${f.sessionId}/${f.fileId}`} className="rx-file">
+                  <div className="row-between">
+                    <span className="file-name">{f.displayName}</span>
+                    <span className="muted small">{Math.floor(f.progress * 100)}% · {f.missingChunks.toLocaleString()} chunks missing</span>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            <button type="button" className="btn" onClick={onReceive}>Resume receiving</button>
+          </>
+        )}
       </section>
       {storage && <p className="muted small center">Browser storage: {storage}</p>}
     </main>
@@ -138,16 +188,15 @@ function Summary({ s, onRestart, onBack, onDone }: { s: TransmissionSummary; onR
   );
 }
 
-function ReceivePlaceholder({ onBack }: { onBack: () => void }) {
+function ReceivedRow({ engine, f }: { engine: ReceiverEngine; f: FileSnapshot }) {
   return (
-    <main className="screen">
-      <header className="screen-header">
-        <button type="button" className="btn btn-ghost" onClick={onBack} aria-label="Back to home">← Back</button>
-        <h1>Receive transfer</h1>
-      </header>
-      <section className="card">
-        <p>The camera receiver is coming in the next build (Phase 3).</p>
-      </section>
-    </main>
+    <li className="rx-file">
+      <div className="row-between">
+        <span className="file-name" title={f.displayName}>{f.displayName}</span>
+        <span className="badge badge-verified">✓ Verified</span>
+      </div>
+      <p className="muted small">{formatBytes(f.fileSize)}{f.mimeType ? ` · ${f.mimeType}` : ''} · received {new Date(f.lastActivity).toLocaleTimeString()}</p>
+      <FileActions engine={engine} f={f} />
+    </li>
   );
 }
