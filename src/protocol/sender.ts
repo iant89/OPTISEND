@@ -19,6 +19,12 @@ export interface SendFileInput {
   name: string;
   mimeType?: string;
   source: ByteSource;
+  /**
+   * Precomputed SHA-256 of the whole source (e.g. from a hashing Web Worker or
+   * a cache, so changing settings does not re-hash). Trusted as-is: a wrong
+   * value makes every receiver reject the file at final verification.
+   */
+  fileHash?: Uint8Array;
 }
 
 export interface PrepareOptions {
@@ -151,10 +157,13 @@ export async function prepareTransfer(inputs: readonly SendFileInput[], opts: Pr
     if (chunkCount > limits.maxChunkCount) {
       throw new SenderError(`"${input.name}" needs ${chunkCount} QR codes; the maximum is ${limits.maxChunkCount}. Use a larger payload size.`);
     }
-    const fileHash = await hashSource(input.source, {
-      onProgress: (n) => opts.onHashProgress?.(i, n, fileSize),
-      ...(opts.signal ? { signal: opts.signal } : {}),
-    });
+    if (input.fileHash && input.fileHash.length !== 32) throw new SenderError('fileHash must be 32 bytes');
+    const fileHash =
+      input.fileHash ??
+      (await hashSource(input.source, {
+        onProgress: (n) => opts.onHashProgress?.(i, n, fileSize),
+        ...(opts.signal ? { signal: opts.signal } : {}),
+      }));
     files.push({
       fileId: i,
       name: sanitizeFileName(input.name, `file-${i + 1}`, Math.min(MAX_NAME_BYTES, limits.maxNameBytes)),

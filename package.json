@@ -1,17 +1,29 @@
 {
   "name": "optisend",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
-  "description": "Offline optical file transfer over QR codes — protocol foundation (Phase 1)",
+  "description": "Offline optical file transfer over QR codes",
   "type": "module",
   "scripts": {
+    "dev": "node scripts/build.mjs --serve",
+    "build": "node scripts/build.mjs",
     "typecheck": "tsc --noEmit",
+    "typecheck:sandbox": "tsc --noEmit -p tsconfig.sandbox.json",
     "test": "node --import tsx --test tests/*.test.ts",
+    "test:e2e": "node --import tsx --test e2e/*.test.ts",
     "verify:qr": "python3 scripts/verify_qr_capacity.py"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/react": "^19.2.0",
+    "@types/react-dom": "^19.2.0",
+    "esbuild": "^0.25.0",
+    "playwright": "^1.50.0",
     "tsx": "^4.20.0",
     "typescript": "^5.9.0"
+  },
+  "dependencies": {
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
   }
 }
