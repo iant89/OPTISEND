@@ -21,6 +21,8 @@ npm run test:e2e     # 15 browser tests (needs `npm run build`, Playwright Chrom
 npm run typecheck
 ```
 
+GitHub Actions runs type checks, the build, unit and optical tests, QR capacity verification, and Chromium end-to-end tests on pushes and pull requests. CI uses Node.js 22, Python 3.11, NumPy, and OpenCV's contrib package; its browser tests run serially to reduce resource contention.
+
 Runtime dependencies: `react`, `react-dom`, and jsQR, vendored in `src/vendor/jsqr/` (Apache-2.0). It has been performance-modified: about 2.4× faster and proven bit-identical to upstream (see the README there). The QR encoder, SHA-256 and the protocol are in-house.
 
 The camera only works on a secure page (https:// or localhost). To test on a phone, serve `dist/` over HTTPS.
