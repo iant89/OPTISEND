@@ -1,0 +1,17 @@
+{
+  "name": "optisend",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Offline optical file transfer over QR codes — protocol foundation (Phase 1)",
+  "type": "module",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "verify:qr": "python3 scripts/verify_qr_capacity.py"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "tsx": "^4.20.0",
+    "typescript": "^5.9.0"
+  }
+}
