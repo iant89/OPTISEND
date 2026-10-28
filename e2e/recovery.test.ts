@@ -85,6 +85,10 @@ test('reload mid-transfer → progress restored from IndexedDB → resume → ve
     const rows = page.locator('section[aria-labelledby="rx-h"] .rx-file');
     await rows.first().waitFor();
     assert.equal(await rows.count(), 2);
+    // Speeds survive the reload; the time the page was closed is not counted.
+    const speeds = await page.locator('section[aria-labelledby="rx-h"] .speed-final').allInnerTexts();
+    assert.equal(speeds.length, 2, JSON.stringify(speeds));
+    assert.ok(speeds.every((t) => /Received in \d+s · [\d.]+ (B|KB)\/s/.test(t)), JSON.stringify(speeds));
     for (const f of FILES) {
       const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: `Save ${f.name}`, exact: true }).click()]);
       assert.ok(readFileSync((await dl.path())!).equals(f.buffer), `${f.name} restored byte-for-byte`);

@@ -299,3 +299,5 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
 .btn-destructive { background: var(--danger); border-color: var(--danger); color: #fff; }
 .btn-destructive:hover:not(:disabled) { background: var(--danger); filter: brightness(1.08); }
 .btn-danger-text { color: var(--danger); }
+.speed { margin: 0; font-variant-numeric: tabular-nums; }
+.speed-final { color: var(--ok); font-weight: 600; }

@@ -66,6 +66,28 @@ export interface FileSnapshot {
   conflicts: number;
   rejectedChunks: number;
   lastActivity: number;
+  timing: FileTiming;
+}
+
+/**
+ * Per-file transfer timing. The clock starts when the file's first chunk is
+ * captured and stops when the file is verified; it only runs while the
+ * receiver is actively scanning (see ReceiverEngine.setReceiving), so pauses,
+ * a closed page or a reload gap are not counted.
+ */
+export interface FileTiming {
+  /** Wall-clock time of the first captured chunk (null until then). */
+  startedAt: number | null;
+  /** Wall-clock time the file was verified (null until then). */
+  verifiedAt: number | null;
+  /** Active receiving time so far, ms. */
+  elapsedMs: number;
+  /**
+   * Bytes per second: final (fileSize / elapsed) once verified, live
+   * (stored bytes / elapsed) while receiving. Null when not meaningful
+   * (nothing yet, under ~1 s of data, or an empty / single-capture file).
+   */
+  bytesPerSecond: number | null;
 }
 
 export interface SessionSnapshot {
@@ -104,6 +126,11 @@ interface FileState {
   conflicts: number;
   rejectedChunks: number;
   lastActivity: number;
+  /** Timing: wall-clock first chunk / verification, accumulated active ms, start of the running segment. */
+  firstChunkAt: number | null;
+  verifiedAt: number | null;
+  activeMs: number;
+  clockMark: number | null;
 }
 
 interface SessionState {
@@ -134,6 +161,10 @@ export interface PersistedFile {
   conflicts: number;
   rejectedChunks: number;
   lastActivity: number;
+  /** Timing (absent in saves from before timing existed). */
+  firstChunkAt?: number | null;
+  verifiedAt?: number | null;
+  activeMs?: number;
 }
 
 export interface PersistedSession {
@@ -176,6 +207,8 @@ export class ReceiverEngine {
   private readonly sessions = new Map<string, SessionState>();
   private readonly listeners = new Set<ReceiverListener>();
   private readonly changeListeners = new Set<ChangeListener>();
+  /** Whether the receiver is actively scanning (drives per-file timing). */
+  private receiving = true;
   private readonly _stats: ReceiverStats = {
     packetsSeen: 0, accepted: 0, duplicates: 0, manifests: 0, rejected: 0, conflicts: 0, storageFailures: 0, rejectReasons: {},
   };
@@ -193,6 +226,32 @@ export class ReceiverEngine {
   subscribe(listener: ReceiverListener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);
+  }
+
+  /**
+   * Tell the engine whether the receiver is actively scanning. Per-file
+   * transfer clocks only run while this is true, so pauses, leaving the
+   * receive screen or a closed page do not count towards a file's time.
+   * Defaults to true (an engine fed packets directly is receiving).
+   */
+  setReceiving(active: boolean): void {
+    if (active === this.receiving) return;
+    const now = this.now();
+    this.receiving = active;
+    for (const s of this.sessions.values()) {
+      for (const f of s.files.values()) {
+        if (f.firstChunkAt === null || f.verifiedAt !== null || f.status === 'hash-mismatch') continue;
+        if (active) f.clockMark = now;
+        else if (f.clockMark !== null) {
+          f.activeMs += Math.max(0, now - f.clockMark);
+          f.clockMark = null;
+        }
+      }
+    }
+  }
+
+  get isReceiving(): boolean {
+    return this.receiving;
   }
 
   /** Notified (with the session id) whenever persisted state changes. */
@@ -283,6 +342,12 @@ export class ReceiverEngine {
     if (file.bitmap.set(i)) {
       file.fingerprints[i] = fingerprint(p.chunkHash);
       file.storedBytes += p.payload.length;
+      if (file.firstChunkAt === null) {
+        // The file's clock starts at its first captured chunk.
+        file.firstChunkAt = at;
+        file.activeMs = 0;
+        file.clockMark = this.receiving ? at : null;
+      }
     }
     if (file.bitmap.complete && file.status === 'receiving') await this.verify(file);
     return { status: 'accepted', sessionId: sid, fileId: p.fileId, chunkIndex: i, fileStatus: file.status };
@@ -362,6 +427,13 @@ export class ReceiverEngine {
       h.update(data);
     }
     file.status = bytesEqual(h.digest(), file.fileHash) ? 'verified' : 'hash-mismatch';
+    // Stop the file's clock: verified (final speed) or failed (no speed).
+    const now = this.now();
+    if (file.clockMark !== null) {
+      file.activeMs += Math.max(0, now - file.clockMark);
+      file.clockMark = null;
+    }
+    if (file.status === 'verified') file.verifiedAt = now;
   }
 
   /**
@@ -454,6 +526,9 @@ export class ReceiverEngine {
         conflicts: f.conflicts,
         rejectedChunks: f.rejectedChunks,
         lastActivity: f.lastActivity,
+        firstChunkAt: f.firstChunkAt,
+        verifiedAt: f.verifiedAt,
+        activeMs: elapsed(f, this.now()),
       })),
     };
   }
@@ -484,6 +559,10 @@ export class ReceiverEngine {
         f.hasManifest = pf.hasManifest;
         f.conflicts = pf.conflicts;
         f.rejectedChunks = pf.rejectedChunks;
+        f.firstChunkAt = typeof pf.firstChunkAt === 'number' ? pf.firstChunkAt : null;
+        f.verifiedAt = typeof pf.verifiedAt === 'number' ? pf.verifiedAt : null;
+        f.activeMs = typeof pf.activeMs === 'number' && pf.activeMs >= 0 ? pf.activeMs : 0;
+        f.clockMark = null; // the clock resumes when scanning does
         const savedBits = new ChunkBitmap(pf.chunkCount, pf.bitmap);
         const present = await this.store.listChunks(ps.id, pf.fileId);
         for (let i = 0; i < pf.chunkCount; i++) {
@@ -509,6 +588,9 @@ export class ReceiverEngine {
         if (pf.status === 'hash-mismatch' && f.bitmap.complete) f.status = 'hash-mismatch';
         else if (pf.status === 'verified' && f.bitmap.complete) f.status = 'verified';
         else f.status = 'receiving';
+        if (f.status !== 'verified') f.verifiedAt = null;
+        if (f.firstChunkAt !== null && f.bitmap.count === 0) { f.firstChunkAt = null; f.activeMs = 0; }
+        if (f.status === 'receiving' && f.firstChunkAt !== null && this.receiving) f.clockMark = this.now();
         s.files.set(pf.fileId, f);
         report.files++;
       }
@@ -526,7 +608,8 @@ export class ReceiverEngine {
 
   snapshot(): SessionSnapshot[] {
     return [...this.sessions.values()].filter((s) => s.files.size > 0).map((s) => {
-      const files = [...s.files.values()].sort((a, b) => a.fileId - b.fileId).map(fileSnapshot);
+      const now = this.now();
+      const files = [...s.files.values()].sort((a, b) => a.fileId - b.fileId).map((f) => fileSnapshot(f, now));
       const totalBytes = files.reduce((n, f) => n + f.fileSize, 0);
       const storedBytes = files.reduce((n, f) => n + f.storedBytes, 0);
       const allFilesKnown = s.declaredFileCount !== null && s.files.size + s.dismissed.size === s.declaredFileCount;
@@ -606,6 +689,10 @@ export class ReceiverEngine {
       conflicts: 0,
       rejectedChunks: 0,
       lastActivity: at,
+      firstChunkAt: null,
+      verifiedAt: null,
+      activeMs: 0,
+      clockMark: null,
     };
   }
 
@@ -671,7 +758,24 @@ function fingerprint(hash: Uint8Array): number {
   return ((hash[0]! << 24) | (hash[1]! << 16) | (hash[2]! << 8) | hash[3]!) >>> 0;
 }
 
-function fileSnapshot(f: FileState): FileSnapshot {
+function elapsed(f: FileState, now: number): number {
+  return f.activeMs + (f.clockMark !== null ? Math.max(0, now - f.clockMark) : 0);
+}
+
+/** Below this much measured time a rate is noise (e.g. a file that fit in one capture). */
+export const MIN_TIMED_MS = 1000;
+
+export function fileTiming(f: Pick<FileState, 'firstChunkAt' | 'verifiedAt' | 'activeMs' | 'clockMark' | 'status' | 'fileSize' | 'storedBytes'>, now: number): FileTiming {
+  const ms = f.firstChunkAt === null ? 0 : elapsed(f as FileState, now);
+  let rate: number | null = null;
+  if (f.firstChunkAt !== null && ms >= MIN_TIMED_MS) {
+    if (f.status === 'verified') rate = f.fileSize > 0 ? (f.fileSize * 1000) / ms : null;
+    else if (f.status === 'receiving' || f.status === 'verifying') rate = (f.storedBytes * 1000) / ms;
+  }
+  return { startedAt: f.firstChunkAt, verifiedAt: f.verifiedAt, elapsedMs: ms, bytesPerSecond: rate };
+}
+
+function fileSnapshot(f: FileState, now: number): FileSnapshot {
   const received = f.bitmap.count;
   return {
     sessionId: f.sessionId,
@@ -691,5 +795,6 @@ function fileSnapshot(f: FileState): FileSnapshot {
     conflicts: f.conflicts,
     rejectedChunks: f.rejectedChunks,
     lastActivity: f.lastActivity,
+    timing: fileTiming(f, now),
   };
 }

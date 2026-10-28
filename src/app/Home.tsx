@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import type { FileSnapshot, ReceiverEngine, SessionSnapshot } from '../protocol/receiver.ts';
 import { ReceiverStorage, type StorageEstimateInfo } from '../storage/persistence.ts';
 import { FileActions } from '../features/files/FileActions.tsx';
+import { TransferSpeed } from '../features/files/TransferSpeed.tsx';
 import { useEngineSnapshot } from '../hooks/useEngineSnapshot.ts';
 import { formatBytes, pluralize } from '../utils/format.ts';
 
@@ -95,8 +96,9 @@ function ReceivedRow({ engine, f }: { engine: ReceiverEngine; f: FileSnapshot })
         <span className="badge badge-verified">✓ Verified</span>
       </div>
       <p className="muted small">
-        {formatBytes(f.fileSize)}{f.mimeType ? ` · ${f.mimeType}` : ''} · received {formatWhen(f.lastActivity)} · SHA-256 checked
+        {formatBytes(f.fileSize)}{f.mimeType ? ` · ${f.mimeType}` : ''} · received {formatWhen(f.timing.verifiedAt ?? f.lastActivity)} · SHA-256 checked
       </p>
+      <TransferSpeed f={f} />
       <FileActions engine={engine} f={f} allowDelete />
     </li>
   );

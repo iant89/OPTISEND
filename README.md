@@ -16,7 +16,7 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 126 unit tests (node:test via tsx)
+npm test             # 133 unit tests (node:test via tsx)
 npm run test:e2e     # 13 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
@@ -85,6 +85,14 @@ The full browser loop (`e2e/receiver.test.ts`) screenshots the real sender app d
 - **"Transfers in progress" limit:** only unfinished transfers count towards it. Finished ones stay listed until you delete them.
 
 Tests: `tests/persistence.test.ts` (save/restore, eviction, crash recovery, deletes, corrupt records), `e2e/storage.test.ts` (real IndexedDB in Chromium, a real reload, and genuine quota exhaustion via DevTools `Storage.overrideQuotaForOrigin`) and `e2e/recovery.test.ts`. The last one is the whole app: a camera transfer interrupted by a reload resumes from IndexedDB; verified files persist across reloads and save byte-for-byte; and delete and clear-all work and survive reloads. It also checks the full-storage banner.
+
+### Per-file transfer speed
+Each file's clock starts when its **first chunk is captured** and stops when the file is **verified**. It runs only while the receiver is actively scanning: pausing, leaving the receive screen, a hidden page, or the gap between closing and reopening the app are not counted. Timing is saved, so it survives reloads.
+
+- While receiving: "Receiving for 42s · 310 B/s", using stored bytes ÷ active time. It appears after 1 s of data.
+- Once verified: "Received in 1m 03s · 412 B/s", using file size ÷ active time.
+- Files that fit in a single capture (or are empty) show "Received instantly" instead of a meaningless rate. Failed files show no rate.
+- The clock starts at the *capture* of the first chunk, so the first chunk's own display time isn't counted. This slightly overstates the rate for files of only a few chunks and is negligible for larger ones.
 
 ### Default transport is text-safe (Base45)
 The browser e2e test showed that desktop QR decoders return byte-mode content as *text* and cut it off at the first zero byte, so every binary frame was rejected (safely, by CRC/length checks). `BarcodeDetector.rawValue` and phone camera apps are text-only too. Text-safe mode works with any scanner and costs about 3% capacity. Binary mode stays available for receivers that read raw bytes.

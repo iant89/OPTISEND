@@ -11,6 +11,7 @@ import { regionOnElement } from './region.ts';
 import { FrameScanner, type ScannerStats } from './scanner.ts';
 import { bitmapToSegments } from './segments.ts';
 import { FileActions } from '../files/FileActions.tsx';
+import { TransferSpeed } from '../files/TransferSpeed.tsx';
 import { ReceiverStorage } from '../../storage/persistence.ts';
 
 export interface ReceiverPrefs {
@@ -92,16 +93,22 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
 
   // Scan only while not paused and the page is visible (the camera keeps running so resume is instant).
   useEffect(() => {
+    // Per-file transfer clocks run only while we are actually scanning.
     const apply = () => {
       const s = scannerRef.current;
+      const scanning = !!s && cam.kind === 'live' && !paused && document.visibilityState !== 'hidden';
+      engine.setReceiving(scanning);
       if (!s) return;
-      if (paused || document.visibilityState === 'hidden') s.stop();
-      else s.start();
+      if (scanning) s.start();
+      else s.stop();
     };
     apply();
     document.addEventListener('visibilitychange', apply);
-    return () => document.removeEventListener('visibilitychange', apply);
-  }, [paused, cam.kind]);
+    return () => {
+      document.removeEventListener('visibilitychange', apply);
+      engine.setReceiving(false);
+    };
+  }, [paused, cam.kind, engine]);
 
   // ── Feedback: subtle flash for new chunks, announcement + optional vibration for completed files ──
   useEffect(() => engine.subscribe((r) => {
@@ -296,6 +303,7 @@ export function FileRow({ engine, f }: { engine: ReceiverEngine; f: FileSnapshot
         <span className="muted">{formatBytes(f.storedBytes)} of {formatBytes(f.fileSize)} · {f.receivedChunks.toLocaleString()}/{f.chunkCount.toLocaleString()} chunks</span>
         <span className="muted">{pct}%</span>
       </div>
+      <TransferSpeed f={f} />
       {f.status === 'verified' && <FileActions engine={engine} f={f} allowDelete />}
       {f.status === 'hash-mismatch' && (
         <div className="button-row">

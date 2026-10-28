@@ -99,6 +99,18 @@ test('sender app → simulated phone camera → receiver app: files verified and
     writeFileSync(join(process.env.OPTISEND_SHOTS, 'rx-done.png'), readFileSync(join(dir, 'rx-done.png')));
   }
 
+  // Per-file speed: first captured chunk → verified. The sender shows one ~280-byte code per
+  // second, so a plausible rate is a few hundred bytes per second.
+  const speeds = await page.locator('.rx-file .speed-final').allInnerTexts();
+  assert.equal(speeds.length, FILES.length, JSON.stringify(speeds));
+  for (const text of speeds) {
+    const m = /Received in (\d+)s · ([\d.]+) (B|KB)\/s/.exec(text);
+    assert.ok(m, `speed text: ${text}`);
+    const bps = Number(m[2]) * (m[3] === 'KB' ? 1024 : 1);
+    assert.ok(bps > 50 && bps < 3000, `implausible rate ${text}`);
+  }
+  console.log(`# per-file speeds: ${speeds.join(' | ')}`);
+
   for (const f of FILES) {
     const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: `Save ${f.name}`, exact: true }).click()]);
     assert.equal(dl.suggestedFilename(), f.name);

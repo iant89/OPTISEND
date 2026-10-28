@@ -59,11 +59,13 @@ export class ReceiverStorage {
       const chunks = new IdbChunkStore(db);
       const sessions = new IdbSessionStore(db);
       const engine = new ReceiverEngine({ store: chunks, ...(opts.limits ? { limits: opts.limits } : {}) });
+      engine.setReceiving(false); // file clocks run only while the receive screen is scanning
       const report = await engine.restore(await sessions.loadAll());
       return new ReceiverStorage(engine, sessions, report, null, debounceMs);
     } catch (e) {
       const store: ChunkStore = new MemoryChunkStore();
       const engine = new ReceiverEngine({ store, ...(opts.limits ? { limits: opts.limits } : {}) });
+      engine.setReceiving(false);
       const reason = e instanceof Error ? e.message : String(e);
       return new ReceiverStorage(engine, null, null, reason, debounceMs);
     }
