@@ -1,0 +1,34 @@
+[
+ {
+  "intervalMs": 750,
+  "maxFps": 12,
+  "deviceFactor": 1,
+  "seed": 1,
+  "dataCodes": 40,
+  "passMs": 31500,
+  "firstPassCoverage": 0.975,
+  "completeMs": 37589.10571008007,
+  "passesNeeded": 1.193304943177145,
+  "goodputBps": 299.6346890205388,
+  "theoreticalBps": 357.55555555555554,
+  "scans": 376,
+  "tornFrames": 13,
+  "avgDecodeMs": 20.444124191489387
+ },
+ {
+  "intervalMs": 250,
+  "maxFps": 12,
+  "deviceFactor": 1,
+  "seed": 1,
+  "dataCodes": 40,
+  "passMs": 10500,
+  "firstPassCoverage": 0.975,
+  "completeMs": 12545.254813842641,
+  "passesNeeded": 1.1947861727469182,
+  "goodputBps": 897.7896557009125,
+  "theoreticalBps": 1072.6666666666667,
+  "scans": 126,
+  "tornFrames": 11,
+  "avgDecodeMs": 18.71287709523812
+ }
+]
