@@ -100,7 +100,7 @@ test('sender app → simulated phone camera → receiver app: files verified and
   }
 
   for (const f of FILES) {
-    const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: `Save ${f.name}` }).click()]);
+    const [dl] = await Promise.all([page.waitForEvent('download'), page.getByRole('button', { name: `Save ${f.name}`, exact: true }).click()]);
     assert.equal(dl.suggestedFilename(), f.name);
     const got = readFileSync((await dl.path())!);
     assert.ok(got.equals(f.buffer), `${f.name} content differs`);

@@ -112,8 +112,52 @@ interface SessionState {
   manifestPartCount: number | null;
   manifestPartsSeen: Set<number>;
   files: Map<number, FileState>;
+  /** File ids the user deleted; their packets are ignored for this session. */
+  dismissed: Set<number>;
   lastActivity: number;
 }
+
+/** Serializable engine state (spec §9.5). Typed arrays survive structured clone / IndexedDB. */
+export interface PersistedFile {
+  fileId: number;
+  name: string | null;
+  mimeType: string | null;
+  fileSize: number;
+  chunkSize: number;
+  chunkCount: number;
+  fileHash: Uint8Array;
+  /** ChunkBitmap bytes. */
+  bitmap: Uint8Array;
+  fingerprints: Uint32Array;
+  status: FileStatus;
+  hasManifest: boolean;
+  conflicts: number;
+  rejectedChunks: number;
+  lastActivity: number;
+}
+
+export interface PersistedSession {
+  id: string;
+  declaredFileCount: number | null;
+  manifestPartCount: number | null;
+  manifestPartsSeen: number[];
+  dismissed: number[];
+  lastActivity: number;
+  files: PersistedFile[];
+}
+
+export interface RestoreReport {
+  sessions: number;
+  files: number;
+  /** Chunks the saved state claimed but storage no longer has (evicted/cleared) — will be received again. */
+  lostChunks: number;
+  /** Chunks found in storage that the saved state had not recorded yet (crash before metadata save). */
+  recoveredChunks: number;
+  /** Saved records that failed validation and were discarded. */
+  discarded: number;
+}
+
+export type ChangeListener = (sessionId: string) => void;
 
 export interface ReceiverOptions {
   store: ChunkStore;
@@ -131,6 +175,7 @@ export class ReceiverEngine {
   private readonly now: () => number;
   private readonly sessions = new Map<string, SessionState>();
   private readonly listeners = new Set<ReceiverListener>();
+  private readonly changeListeners = new Set<ChangeListener>();
   private readonly _stats: ReceiverStats = {
     packetsSeen: 0, accepted: 0, duplicates: 0, manifests: 0, rejected: 0, conflicts: 0, storageFailures: 0, rejectReasons: {},
   };
@@ -150,6 +195,16 @@ export class ReceiverEngine {
     return () => this.listeners.delete(listener);
   }
 
+  /** Notified (with the session id) whenever persisted state changes. */
+  onChange(listener: ChangeListener): () => void {
+    this.changeListeners.add(listener);
+    return () => this.changeListeners.delete(listener);
+  }
+
+  private changed(sessionId: string): void {
+    for (const l of this.changeListeners) l(sessionId);
+  }
+
   /** Process one packet. Never throws for bad input — returns a result instead. */
   async ingest(raw: Uint8Array): Promise<IngestResult> {
     this._stats.packetsSeen++;
@@ -162,6 +217,7 @@ export class ReceiverEngine {
       result = { status: 'rejected', reason: e.reason, detail: e.detail };
     }
     this.count(result);
+    if ((result.status === 'accepted' || result.status === 'manifest' || result.status === 'conflict')) this.changed(result.sessionId);
     for (const l of this.listeners) l(result);
     return result;
   }
@@ -173,6 +229,7 @@ export class ReceiverEngine {
     const i = p.chunkIndex;
     const at = this.now();
     let session = this.sessions.get(sid);
+    if (session?.dismissed.has(p.fileId)) return { status: 'duplicate', sessionId: sid, fileId: p.fileId, chunkIndex: i };
     let file = session?.files.get(p.fileId);
 
     if (file) {
@@ -260,7 +317,7 @@ export class ReceiverEngine {
         return { status: 'conflict', sessionId: sid, fileId: e.fileId, detail: 'manifest name/type differs from earlier manifest' };
       }
     }
-    const newCount = m.entries.filter((e) => !session.files.has(e.fileId)).length;
+    const newCount = m.entries.filter((e) => !session.files.has(e.fileId) && !session.dismissed.has(e.fileId)).length;
     try {
       this.checkCapacity(session, newCount);
     } catch (e) {
@@ -274,6 +331,7 @@ export class ReceiverEngine {
     session.manifestPartsSeen.add(m.partIndex);
     let newFiles = 0;
     for (const e of m.entries) {
+      if (session.dismissed.has(e.fileId)) continue;
       let f = session.files.get(e.fileId);
       if (!f) {
         f = this.createFile(session, e.fileId, e, session.lastActivity);
@@ -320,6 +378,7 @@ export class ReceiverEngine {
       if (!data || fingerprint(sha256(data)) !== file.fingerprints[i]) {
         file.status = 'receiving';
         if (file.bitmap.clear(i)) file.storedBytes -= chunkRange(file.fileSize, file.chunkSize, i).length;
+        this.changed(sessionId);
         throw new Error(`chunk ${i} missing or damaged in storage; the file must be received again`);
       }
       yield data;
@@ -339,11 +398,126 @@ export class ReceiverEngine {
     fresh.mimeType = f.mimeType;
     fresh.hasManifest = f.hasManifest;
     session.files.set(fileId, fresh);
+    this.changed(sessionId);
+  }
+
+  /**
+   * Delete one file (spec §11.2). Its chunks are removed and further packets
+   * for it in this session are ignored, so a sender that is still looping
+   * does not bring it back.
+   */
+  async removeFile(sessionId: string, fileId: number): Promise<void> {
+    const session = this.sessions.get(sessionId);
+    if (!session || !session.files.has(fileId)) return;
+    session.files.delete(fileId);
+    session.dismissed.add(fileId);
+    await this.store.deleteFile(sessionId, fileId);
+    this.changed(sessionId);
   }
 
   async removeSession(sessionId: string): Promise<void> {
     if (!this.sessions.delete(sessionId)) return;
     await this.store.deleteSession(sessionId);
+    this.changed(sessionId);
+  }
+
+  /** All session ids currently held (including ones whose files were all deleted). */
+  sessionIds(): string[] {
+    return [...this.sessions.keys()];
+  }
+
+  // ── Persistence ──
+
+  exportSession(sessionId: string): PersistedSession | null {
+    const s = this.sessions.get(sessionId);
+    if (!s) return null;
+    return {
+      id: s.id,
+      declaredFileCount: s.declaredFileCount,
+      manifestPartCount: s.manifestPartCount,
+      manifestPartsSeen: [...s.manifestPartsSeen],
+      dismissed: [...s.dismissed],
+      lastActivity: s.lastActivity,
+      files: [...s.files.values()].map((f) => ({
+        fileId: f.fileId,
+        name: f.name,
+        mimeType: f.mimeType,
+        fileSize: f.fileSize,
+        chunkSize: f.chunkSize,
+        chunkCount: f.chunkCount,
+        fileHash: f.fileHash.slice(),
+        bitmap: f.bitmap.toBytes(),
+        fingerprints: f.fingerprints.slice(),
+        // A file mid-verification is saved as receiving; it re-verifies on restore.
+        status: f.status === 'verifying' ? 'receiving' : f.status,
+        hasManifest: f.hasManifest,
+        conflicts: f.conflicts,
+        rejectedChunks: f.rejectedChunks,
+        lastActivity: f.lastActivity,
+      })),
+    };
+  }
+
+  /**
+   * Restore saved sessions, reconciling them with what the chunk store
+   * actually holds (stored chunks are the source of truth). Call before
+   * ingesting any packets.
+   */
+  async restore(saved: readonly PersistedSession[]): Promise<RestoreReport> {
+    const report: RestoreReport = { sessions: 0, files: 0, lostChunks: 0, recoveredChunks: 0, discarded: 0 };
+    for (const ps of saved) {
+      if (!validSession(ps)) { report.discarded++; continue; }
+      const s: SessionState = {
+        id: ps.id,
+        declaredFileCount: ps.declaredFileCount,
+        manifestPartCount: ps.manifestPartCount,
+        manifestPartsSeen: new Set(ps.manifestPartsSeen),
+        files: new Map(),
+        dismissed: new Set(ps.dismissed),
+        lastActivity: ps.lastActivity,
+      };
+      for (const pf of ps.files) {
+        if (!validFile(pf, this.limits)) { report.discarded++; continue; }
+        const f = this.newFileState(ps.id, pf.fileId, pf, pf.lastActivity);
+        f.name = pf.name;
+        f.mimeType = pf.mimeType;
+        f.hasManifest = pf.hasManifest;
+        f.conflicts = pf.conflicts;
+        f.rejectedChunks = pf.rejectedChunks;
+        const savedBits = new ChunkBitmap(pf.chunkCount, pf.bitmap);
+        const present = await this.store.listChunks(ps.id, pf.fileId);
+        for (let i = 0; i < pf.chunkCount; i++) {
+          const expected = chunkRange(pf.fileSize, pf.chunkSize, i).length;
+          const have = present.get(i) === expected;
+          if (savedBits.has(i) && have) {
+            f.bitmap.set(i);
+            f.fingerprints[i] = pf.fingerprints[i]!;
+            f.storedBytes += expected;
+          } else if (savedBits.has(i)) {
+            report.lostChunks++;
+          } else if (have) {
+            // Written to storage but not yet recorded in the saved state: recover it.
+            const data = await this.store.get({ sessionId: ps.id, fileId: pf.fileId, chunkIndex: i });
+            if (data && data.length === expected) {
+              f.bitmap.set(i);
+              f.fingerprints[i] = fingerprint(sha256(data));
+              f.storedBytes += expected;
+              report.recoveredChunks++;
+            }
+          }
+        }
+        if (pf.status === 'hash-mismatch' && f.bitmap.complete) f.status = 'hash-mismatch';
+        else if (pf.status === 'verified' && f.bitmap.complete) f.status = 'verified';
+        else f.status = 'receiving';
+        s.files.set(pf.fileId, f);
+        report.files++;
+      }
+      this.sessions.set(s.id, s);
+      report.sessions++;
+      // A file that became complete through recovery still needs its full-file check.
+      for (const f of s.files.values()) if (f.status === 'receiving' && f.bitmap.complete) await this.verify(f);
+    }
+    return report;
   }
 
   bitmap(sessionId: string, fileId: number): ChunkBitmap | undefined {
@@ -351,11 +525,11 @@ export class ReceiverEngine {
   }
 
   snapshot(): SessionSnapshot[] {
-    return [...this.sessions.values()].map((s) => {
+    return [...this.sessions.values()].filter((s) => s.files.size > 0).map((s) => {
       const files = [...s.files.values()].sort((a, b) => a.fileId - b.fileId).map(fileSnapshot);
       const totalBytes = files.reduce((n, f) => n + f.fileSize, 0);
       const storedBytes = files.reduce((n, f) => n + f.storedBytes, 0);
-      const allFilesKnown = s.declaredFileCount !== null && s.files.size === s.declaredFileCount;
+      const allFilesKnown = s.declaredFileCount !== null && s.files.size + s.dismissed.size === s.declaredFileCount;
       let progress: number;
       if (totalBytes > 0) progress = storedBytes / totalBytes;
       else {
@@ -383,15 +557,13 @@ export class ReceiverEngine {
   private sessionFor(sid: string): SessionState {
     let s = this.sessions.get(sid);
     if (s) return s;
-    if (this.sessions.size >= this.limits.maxActiveSessions) {
-      // Make room by forgetting (in memory only) the oldest fully verified session.
-      const done = [...this.sessions.values()]
-        .filter((x) => x.files.size > 0 && [...x.files.values()].every((f) => f.status === 'verified'))
-        .sort((a, b) => a.lastActivity - b.lastActivity)[0];
-      if (!done) throw new ProtocolError('limit-exceeded', `too many active transfer sessions (max ${this.limits.maxActiveSessions})`);
-      this.sessions.delete(done.id);
+    // Only transfers still in progress count towards the limit; finished ones stay
+    // listed (and persisted) until the user deletes them.
+    const active = [...this.sessions.values()].filter((x) => x.files.size === 0 ? x.dismissed.size === 0 : [...x.files.values()].some((f) => f.status !== 'verified')).length;
+    if (active >= this.limits.maxActiveSessions) {
+      throw new ProtocolError('limit-exceeded', `too many transfers in progress (max ${this.limits.maxActiveSessions}); finish or delete one`);
     }
-    s = { id: sid, declaredFileCount: null, manifestPartCount: null, manifestPartsSeen: new Set(), files: new Map(), lastActivity: this.now() };
+    s = { id: sid, declaredFileCount: null, manifestPartCount: null, manifestPartsSeen: new Set(), files: new Map(), dismissed: new Set(), lastActivity: this.now() };
     this.sessions.set(sid, s);
     return s;
   }
@@ -468,6 +640,31 @@ function metadataMismatch(f: FileMeta, m: FileMeta): string | null {
   if (f.chunkCount !== m.chunkCount) return `chunk count ${m.chunkCount} conflicts with ${f.chunkCount}`;
   if (!bytesEqual(f.fileHash, m.fileHash)) return 'file hash conflicts with earlier packets';
   return null;
+}
+
+function isInt(v: unknown, min = 0, max = Number.MAX_SAFE_INTEGER): v is number {
+  return typeof v === 'number' && Number.isInteger(v) && v >= min && v <= max;
+}
+
+function validSession(ps: PersistedSession): boolean {
+  return !!ps && typeof ps.id === 'string' && /^[0-9a-f]{16}$/.test(ps.id) && Array.isArray(ps.files) &&
+    (ps.declaredFileCount === null || isInt(ps.declaredFileCount, 1, 0xffff)) &&
+    (ps.manifestPartCount === null || isInt(ps.manifestPartCount, 1, 0xffff)) &&
+    Array.isArray(ps.manifestPartsSeen) && ps.manifestPartsSeen.every((n) => isInt(n, 0, 0xffff)) &&
+    Array.isArray(ps.dismissed ?? []) && (ps.dismissed ?? []).every((n) => isInt(n, 0, 0xffff)) &&
+    typeof ps.lastActivity === 'number';
+}
+
+function validFile(pf: PersistedFile, limits: ProtocolLimits): boolean {
+  if (!pf || !isInt(pf.fileId, 0, 0xffff) || !isInt(pf.fileSize, 0, limits.maxFileSize) || !isInt(pf.chunkSize, 1, limits.maxPayloadLength)) return false;
+  if (!isInt(pf.chunkCount, 1, limits.maxChunkCount) || pf.chunkCount !== (pf.fileSize === 0 ? 1 : Math.ceil(pf.fileSize / pf.chunkSize))) return false;
+  if (!(pf.fileHash instanceof Uint8Array) || pf.fileHash.length !== 32) return false;
+  if (!(pf.bitmap instanceof Uint8Array) || pf.bitmap.length !== Math.ceil(pf.chunkCount / 8)) return false;
+  if (!(pf.fingerprints instanceof Uint32Array) || pf.fingerprints.length !== pf.chunkCount) return false;
+  if (!['receiving', 'verifying', 'verified', 'hash-mismatch'].includes(pf.status)) return false;
+  if (pf.name !== null && typeof pf.name !== 'string') return false;
+  if (pf.mimeType !== null && typeof pf.mimeType !== 'string') return false;
+  return true;
 }
 
 function fingerprint(hash: Uint8Array): number {

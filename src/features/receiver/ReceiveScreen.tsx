@@ -11,6 +11,7 @@ import { regionOnElement } from './region.ts';
 import { FrameScanner, type ScannerStats } from './scanner.ts';
 import { bitmapToSegments } from './segments.ts';
 import { FileActions } from '../files/FileActions.tsx';
+import { ReceiverStorage } from '../../storage/persistence.ts';
 
 export interface ReceiverPrefs {
   decoderMode: DecoderMode;
@@ -18,7 +19,7 @@ export interface ReceiverPrefs {
 }
 
 interface Props {
-  engine: ReceiverEngine;
+  storage: ReceiverStorage;
   prefs: ReceiverPrefs;
   setPrefs: (p: ReceiverPrefs) => void;
   onExit: () => void;
@@ -26,7 +27,8 @@ interface Props {
 
 type CamState = { kind: 'starting' } | { kind: 'live' } | { kind: 'error'; error: CameraErrorKind; detail: string };
 
-export function ReceiveScreen({ engine, prefs, setPrefs, onExit }: Props) {
+export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
+  const engine = storage.engine;
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const stageRef = useRef<HTMLDivElement | null>(null);
   const scannerRef = useRef<FrameScanner | null>(null);
@@ -39,6 +41,8 @@ export function ReceiveScreen({ engine, prefs, setPrefs, onExit }: Props) {
   const [flash, setFlash] = useState(0);
   const [announce, setAnnounce] = useState('');
   const { sessions } = useEngineSnapshot(engine);
+  const [storageIssue, setStorageIssue] = useState<{ quota: boolean; detail: string; count: number } | null>(null);
+  const [available, setAvailable] = useState<number | null>(null);
 
   useWakeLock(cam.kind === 'live' && !paused);
 
@@ -115,7 +119,21 @@ export function ReceiveScreen({ engine, prefs, setPrefs, onExit }: Props) {
     }
   }), [engine, prefs.vibrate]);
 
+  // Storage problems (spec §9.4, §11.3): failed writes are not counted and stay eligible for the next pass.
+  useEffect(() => engine.subscribe((r) => {
+    if (r.status !== 'storage-error') return;
+    const quota = /full|quota/i.test(r.detail);
+    setStorageIssue((prev) => ({ quota, detail: r.detail, count: (prev?.count ?? 0) + 1 }));
+    if (quota) setAnnounce('Storage is full: some data could not be saved');
+  }), [engine]);
+  useEffect(() => {
+    void ReceiverStorage.estimate().then((e) => setAvailable(e.quota != null ? Math.max(0, e.quota - (e.usage ?? 0)) : null));
+  }, [storageIssue?.count]);
+
   const active = pickActiveSession(sessions);
+  // Pre-flight: does the rest of this transfer fit in the browser's storage quota?
+  const remaining = active ? active.totalBytes - active.storedBytes : 0;
+  const tooBig = active !== null && active.allFilesKnown && available !== null && remaining > available;
   const st = engine.stats;
   const files = active?.files ?? [];
   const missing = files.reduce((n, f) => n + f.missingChunks, 0);
@@ -146,6 +164,24 @@ export function ReceiveScreen({ engine, prefs, setPrefs, onExit }: Props) {
       </div>
 
       <div className="receive-panel">
+        {!storage.state.durable && (
+          <p className="notice notice-warn small" role="status">Browser storage is unavailable, so received data is kept only while this page stays open.</p>
+        )}
+        {storageIssue && (
+          <div className="notice notice-error" role="alert">
+            {storageIssue.quota ? (
+              <p><strong>Storage is full.</strong> {pluralize(storageIssue.count, 'chunk')} couldn’t be saved; they will be picked up again on a later pass once space is free. Delete old transfers on the home screen, or free up space on this device.</p>
+            ) : (
+              <p><strong>Couldn’t save to browser storage</strong> ({storageIssue.detail}). {pluralize(storageIssue.count, 'chunk')} will be received again on a later pass.</p>
+            )}
+            <button type="button" className="btn btn-ghost" onClick={() => setStorageIssue(null)}>Dismiss</button>
+          </div>
+        )}
+        {tooBig && !storageIssue && (
+          <p className="notice notice-warn small" role="status">
+            This transfer needs about {formatBytes(remaining)} more, but only about {formatBytes(available ?? 0)} of browser storage is available. Free some space or delete old transfers first.
+          </p>
+        )}
         {active ? (
           <SessionView engine={engine} session={active} />
         ) : (
@@ -260,7 +296,7 @@ export function FileRow({ engine, f }: { engine: ReceiverEngine; f: FileSnapshot
         <span className="muted">{formatBytes(f.storedBytes)} of {formatBytes(f.fileSize)} · {f.receivedChunks.toLocaleString()}/{f.chunkCount.toLocaleString()} chunks</span>
         <span className="muted">{pct}%</span>
       </div>
-      {f.status === 'verified' && <FileActions engine={engine} f={f} />}
+      {f.status === 'verified' && <FileActions engine={engine} f={f} allowDelete />}
       {f.status === 'hash-mismatch' && (
         <div className="button-row">
           <button type="button" className="btn" onClick={() => void engine.resetFile(f.sessionId, f.fileId)}>Discard and receive again</button>

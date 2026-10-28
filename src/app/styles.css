@@ -286,3 +286,16 @@ fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
   .receive-stage { flex: 1 1 60%; }
   .receive-panel { flex: 0 0 clamp(300px, 36vw, 420px); }
 }
+
+/* ── Phase 4: notices & confirmations ── */
+.notice { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.notice-warn { border-left-color: var(--focus); }
+.notice-error { border-left-color: var(--danger); background: color-mix(in srgb, var(--danger) 8%, var(--surface)); }
+.notice p { margin: 0; }
+.confirm-row {
+  display: flex; flex-direction: column; gap: 8px; padding: 10px 12px; border-radius: 10px;
+  border: 1px solid color-mix(in srgb, var(--danger) 45%, var(--border)); background: color-mix(in srgb, var(--danger) 6%, var(--surface));
+}
+.btn-destructive { background: var(--danger); border-color: var(--danger); color: #fff; }
+.btn-destructive:hover:not(:disabled) { background: var(--danger); filter: brightness(1.08); }
+.btn-danger-text { color: var(--danger); }

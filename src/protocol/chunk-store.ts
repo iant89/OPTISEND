@@ -18,6 +18,8 @@ export interface ChunkStore {
   get(key: ChunkKey): Promise<Uint8Array | undefined>;
   deleteFile(sessionId: string, fileId: number): Promise<void>;
   deleteSession(sessionId: string): Promise<void>;
+  /** Stored chunks of one file: chunk index → byte length (used to reconcile state after a reload). */
+  listChunks(sessionId: string, fileId: number): Promise<Map<number, number>>;
 }
 
 export class StorageQuotaError extends Error {
@@ -55,6 +57,13 @@ export class MemoryChunkStore implements ChunkStore {
 
   async deleteSession(sessionId: string): Promise<void> {
     this.deletePrefix(`${sessionId}/`);
+  }
+
+  async listChunks(sessionId: string, fileId: number): Promise<Map<number, number>> {
+    const prefix = `${sessionId}/${fileId}/`;
+    const out = new Map<number, number>();
+    for (const [id, v] of this.map) if (id.startsWith(prefix)) out.set(Number(id.slice(prefix.length)), v.length);
+    return out;
   }
 
   /** Test hook: simulate eviction of one chunk. */

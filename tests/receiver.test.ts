@@ -202,7 +202,7 @@ test('concurrent duplicate while a write is in flight is not double-counted', as
   const inner = new MemoryChunkStore();
   const slow: ChunkStore = {
     put: async (k, d) => { await gate; return inner.put(k, d); },
-    get: (k) => inner.get(k), deleteFile: (s, f) => inner.deleteFile(s, f), deleteSession: (s) => inner.deleteSession(s),
+    get: (k) => inner.get(k), deleteFile: (s, f) => inner.deleteFile(s, f), deleteSession: (s) => inner.deleteSession(s), listChunks: (s, f) => inner.listChunks(s, f),
   };
   const rx = engine(slow);
   const pkt = (await allDataPackets(p))[0]!;

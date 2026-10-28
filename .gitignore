@@ -3,3 +3,4 @@ dist/
 bench/corpus.bin
 bench/*.cpuprofile
 bench/*.json
+dist-harness/

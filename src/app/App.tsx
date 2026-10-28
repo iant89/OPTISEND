@@ -1,14 +1,12 @@
-import { useEffect, useMemo, useState } from 'react';
-import { ReceiverEngine, type FileSnapshot } from '../protocol/receiver.ts';
-import { MemoryChunkStore } from '../protocol/chunk-store.ts';
+import { useEffect, useState } from 'react';
 import { ReceiveScreen, type ReceiverPrefs } from '../features/receiver/ReceiveScreen.tsx';
-import { FileActions } from '../features/files/FileActions.tsx';
-import { useEngineSnapshot } from '../hooks/useEngineSnapshot.ts';
+import { ReceiverStorage } from '../storage/persistence.ts';
+import { Home } from './Home.tsx';
 import type { TransferPlan } from '../protocol/sender.ts';
 import { SendScreen, type QueuedFile } from '../features/sender/SendScreen.tsx';
 import { TransmitView, type TransmissionSummary } from '../features/sender/TransmitView.tsx';
 import { DEFAULT_SETTINGS, sanitizeSettings, type ResolvedQrConfig, type SenderSettings } from '../features/sender/settings.ts';
-import { formatBytes, formatDuration, pluralize } from '../utils/format.ts';
+import { formatBytes, formatDuration } from '../utils/format.ts';
 
 type Screen =
   | { name: 'home' }
@@ -47,9 +45,14 @@ export function App() {
   const [queue, setQueue] = useState<QueuedFile[]>([]);
   const [settings, setSettings] = useState<SenderSettings>(loadSettings);
   const [rxPrefs, setRxPrefs] = useState<ReceiverPrefs>(loadRxPrefs);
-  // One receiver engine for the app's lifetime: leaving the receive screen keeps
-  // partial transfers, so the user can resume (persistence arrives in Phase 4).
-  const engine = useMemo(() => new ReceiverEngine({ store: new MemoryChunkStore() }), []);
+  // One receiver engine for the app's lifetime, backed by IndexedDB: transfers
+  // survive leaving the receive screen and reloading the page.
+  const [storage, setStorage] = useState<ReceiverStorage | null>(null);
+  useEffect(() => {
+    let live = true;
+    void ReceiverStorage.open().then((s) => { if (live) setStorage(s); else s.dispose(); });
+    return () => { live = false; };
+  }, []);
 
   useEffect(() => {
     try { localStorage.setItem(RX_PREFS_KEY, JSON.stringify(rxPrefs)); } catch { /* per-visit only */ }
@@ -65,9 +68,15 @@ export function App() {
     if (el) { if (!el.hasAttribute('tabindex')) el.setAttribute('tabindex', '-1'); el.focus({ preventScroll: true }); }
   }, [screen.name]);
 
+  if (!storage && (screen.name === 'home' || screen.name === 'receive')) {
+    return (
+      <main className="screen"><p className="muted" role="status">Loading saved transfers…</p></main>
+    );
+  }
+
   switch (screen.name) {
     case 'home':
-      return <Home engine={engine} queued={queue.length} onSend={() => setScreen({ name: 'send' })} onReceive={() => setScreen({ name: 'receive' })} />;
+      return <Home storage={storage!} queued={queue.length} onSend={() => setScreen({ name: 'send' })} onReceive={() => setScreen({ name: 'receive' })} />;
     case 'send':
       return (
         <SendScreen
@@ -91,70 +100,8 @@ export function App() {
         />
       );
     case 'receive':
-      return <ReceiveScreen engine={engine} prefs={rxPrefs} setPrefs={setRxPrefs} onExit={() => setScreen({ name: 'home' })} />;
+      return <ReceiveScreen storage={storage!} prefs={rxPrefs} setPrefs={setRxPrefs} onExit={() => { void storage!.flush(); setScreen({ name: 'home' }); }} />;
   }
-}
-
-function Home({ engine, queued, onSend, onReceive }: { engine: ReceiverEngine; queued: number; onSend: () => void; onReceive: () => void }) {
-  const [storage, setStorage] = useState<string | null>(null);
-  const { sessions } = useEngineSnapshot(engine, 500);
-  const all = sessions.flatMap((s) => s.files);
-  const received = all.filter((f) => f.status === 'verified');
-  const incomplete = all.filter((f) => f.status !== 'verified');
-  useEffect(() => {
-    navigator.storage?.estimate?.().then(
-      (e) => { if (e.quota) setStorage(`${formatBytes(e.usage ?? 0)} used of ${formatBytes(e.quota)} available`); },
-      () => undefined,
-    );
-  }, []);
-  return (
-    <main className="screen home">
-      <header className="brand">
-        <h1><span className="logo" aria-hidden="true">▣</span> OptiSend</h1>
-        <p className="muted">Move files between devices using only a screen and a camera. Nothing is uploaded.</p>
-      </header>
-      <div className="home-actions">
-        <button type="button" className="action-card" onClick={onSend}>
-          <span className="action-icon" aria-hidden="true">↑</span>
-          <span className="action-title">Send files</span>
-          <span className="action-sub muted">{queued ? `${pluralize(queued, 'file')} queued` : 'Turn files into a stream of QR codes'}</span>
-        </button>
-        <button type="button" className="action-card" onClick={onReceive}>
-          <span className="action-icon" aria-hidden="true">↓</span>
-          <span className="action-title">Receive transfer</span>
-          <span className="action-sub muted">Scan codes with this device's camera</span>
-        </button>
-      </div>
-      <section className="card" aria-labelledby="rx-h">
-        <h2 id="rx-h">Received files</h2>
-        {received.length === 0 ? <p className="muted">Nothing received yet.</p> : (
-          <ul className="rx-files">
-            {received.map((f) => <ReceivedRow key={`${f.sessionId}/${f.fileId}`} engine={engine} f={f} />)}
-          </ul>
-        )}
-        {received.length > 0 && <p className="muted small">Received files are kept only while this page is open. Save the ones you need.</p>}
-      </section>
-      <section className="card" aria-labelledby="inc-h">
-        <h2 id="inc-h">Incomplete transfers</h2>
-        {incomplete.length === 0 ? <p className="muted">None.</p> : (
-          <>
-            <ul className="rx-files">
-              {incomplete.map((f) => (
-                <li key={`${f.sessionId}/${f.fileId}`} className="rx-file">
-                  <div className="row-between">
-                    <span className="file-name">{f.displayName}</span>
-                    <span className="muted small">{Math.floor(f.progress * 100)}% · {f.missingChunks.toLocaleString()} chunks missing</span>
-                  </div>
-                </li>
-              ))}
-            </ul>
-            <button type="button" className="btn" onClick={onReceive}>Resume receiving</button>
-          </>
-        )}
-      </section>
-      {storage && <p className="muted small center">Browser storage: {storage}</p>}
-    </main>
-  );
 }
 
 function Summary({ s, onRestart, onBack, onDone }: { s: TransmissionSummary; onRestart: () => void; onBack: () => void; onDone: () => void }) {
@@ -185,18 +132,5 @@ function Summary({ s, onRestart, onBack, onDone }: { s: TransmissionSummary; onR
         <button type="button" className="btn btn-ghost" onClick={onDone}>Done</button>
       </div>
     </main>
-  );
-}
-
-function ReceivedRow({ engine, f }: { engine: ReceiverEngine; f: FileSnapshot }) {
-  return (
-    <li className="rx-file">
-      <div className="row-between">
-        <span className="file-name" title={f.displayName}>{f.displayName}</span>
-        <span className="badge badge-verified">✓ Verified</span>
-      </div>
-      <p className="muted small">{formatBytes(f.fileSize)}{f.mimeType ? ` · ${f.mimeType}` : ''} · received {new Date(f.lastActivity).toLocaleTimeString()}</p>
-      <FileActions engine={engine} f={f} />
-    </li>
   );
 }

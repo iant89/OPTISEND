@@ -53,3 +53,38 @@ export async function shareBlob(blob: Blob, name: string): Promise<'shared' | 'c
     throw e;
   }
 }
+
+interface WritableLike { write(data: Uint8Array): Promise<void>; close(): Promise<void>; abort(): Promise<void> }
+interface SaveHandleLike { createWritable(): Promise<WritableLike> }
+type SavePicker = (opts: { suggestedName: string }) => Promise<SaveHandleLike>;
+
+/** File System Access API "Save as" (desktop Chromium). */
+export function canSaveAs(): boolean {
+  return typeof (globalThis as { showSaveFilePicker?: SavePicker }).showSaveFilePicker === 'function';
+}
+
+/**
+ * Stream a verified file chunk-by-chunk to a user-chosen location — memory use
+ * stays bounded regardless of file size (spec §11.1, §16). Resolves quietly if
+ * the user cancels the picker.
+ */
+export async function saveAsStream(engine: ReceiverEngine, f: { sessionId: string; fileId: number; displayName: string }): Promise<'saved' | 'cancelled'> {
+  const picker = (globalThis as { showSaveFilePicker?: SavePicker }).showSaveFilePicker;
+  if (!picker) throw new Error('Save as is not supported in this browser');
+  let handle: SaveHandleLike;
+  try {
+    handle = await picker({ suggestedName: sanitizeFileName(f.displayName) });
+  } catch (e) {
+    if ((e as { name?: string }).name === 'AbortError') return 'cancelled';
+    throw e;
+  }
+  const w = await handle.createWritable();
+  try {
+    for await (const chunk of engine.readFile(f.sessionId, f.fileId)) await w.write(chunk);
+    await w.close();
+    return 'saved';
+  } catch (e) {
+    await w.abort().catch(() => undefined); // never leave a partial file behind
+    throw e;
+  }
+}

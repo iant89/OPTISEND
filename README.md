@@ -7,7 +7,8 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 | 1 · Protocol foundation | ✅ done |
 | 2 · Sender | ✅ done |
 | 3 · Receiver (camera) | ✅ done |
-| 4 · Storage & recovery | next (IndexedDB persistence, resume after reload) |
+| 4 · Storage & recovery | ✅ done |
+| 5 · Reliability optimization | next (real-device testing, calibration, in-house decoder) |
 
 ## Quick start
 
@@ -15,8 +16,8 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 116 unit tests (node:test via tsx)
-npm run test:e2e     # 8 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
+npm test             # 126 unit tests (node:test via tsx)
+npm run test:e2e     # 13 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
 
@@ -54,6 +55,37 @@ The camera only works on a secure page (https:// or localhost). To test on a pho
 
 The full browser loop (`e2e/receiver.test.ts`) screenshots the real sender app during a transfer, "films" it with a simulated hand-held camera, and plays that to a second Chromium as its webcam. The receiver app decoded 81 of 85 frames (95%) and verified and saved both files byte-for-byte in about 8 seconds of scanning.
 
+## Phase 4 — Storage & recovery
+
+- **IndexedDB** (`src/storage/idb.ts`), database `optisend` v1. It has three object stores:
+  - `chunks`: key `[sessionId, fileId, index]`, value the payload.
+  - `chunkMeta`: the same key, value the byte length, so restore can list chunks without loading them.
+  - `sessions`: the engine metadata (bitmaps, fingerprints, status, names, deleted ids).
+
+  A chunk write resolves only when its transaction commits, with `durability: 'strict'`. Failed requests abort the transaction, so a chunk that didn't land is never counted.
+- **Saving state:** the engine emits change events. `ReceiverStorage` saves metadata within 400 ms of a change, and immediately when the page is hidden or closed.
+- **Restoring:** reconciliation treats the stored chunks as the source of truth.
+  - A chunk the saved state claims but storage lost (browser eviction) is counted as lost and received again.
+  - A chunk written after the last metadata save (the page died in between) is recovered by re-hashing it.
+  - A file that becomes complete through recovery gets its full-file SHA-256 check.
+  - Corrupt saved records are validated and discarded.
+- **Survives reloads:** partial progress, names and types, verified files, hash-mismatch state and deleted files all persist. A deleted file stays deleted even if the sender keeps looping.
+- **Storage management (home screen):**
+  - Received files with Save, Save as…, Share and Delete. Delete asks for confirmation.
+  - Incomplete transfers with progress, missing chunks, last activity, Resume and Delete.
+  - Storage figures: received, incomplete, OptiSend total and browser quota left.
+  - "Keep files on this device" (`navigator.storage.persist()`) and "Clear all data…" with a two-step confirmation.
+  - A notice when a reload restored transfers, including lost or recovered chunks.
+- **Errors:**
+  - A full quota shows a "Storage is full" banner on the receive screen with what to do. The affected chunks stay eligible for the next pass.
+  - A warning appears before scanning when the rest of a transfer won't fit in the available quota.
+  - Failed metadata saves are reported on the home screen.
+  - If IndexedDB is unavailable, OptiSend falls back to memory and says so clearly.
+- **Save as…** (File System Access API, desktop Chromium) streams the file chunk by chunk to disk, so memory use stays bounded. If it fails partway, the partial file is aborted.
+- **"Transfers in progress" limit:** only unfinished transfers count towards it. Finished ones stay listed until you delete them.
+
+Tests: `tests/persistence.test.ts` (save/restore, eviction, crash recovery, deletes, corrupt records), `e2e/storage.test.ts` (real IndexedDB in Chromium, a real reload, and genuine quota exhaustion via DevTools `Storage.overrideQuotaForOrigin`) and `e2e/recovery.test.ts`. The last one is the whole app: a camera transfer interrupted by a reload resumes from IndexedDB; verified files persist across reloads and save byte-for-byte; and delete and clear-all work and survive reloads. It also checks the full-storage banner.
+
 ### Default transport is text-safe (Base45)
 The browser e2e test showed that desktop QR decoders return byte-mode content as *text* and cut it off at the first zero byte, so every binary frame was rejected (safely, by CRC/length checks). `BarcodeDetector.rawValue` and phone camera apps are text-only too. Text-safe mode works with any scanner and costs about 3% capacity. Binary mode stays available for receivers that read raw bytes.
 
@@ -69,7 +101,9 @@ The browser e2e test showed that desktop QR decoders return byte-mode content as
 | `src/qr/decoders/` | Decoder plug-in interface, chain with per-decoder stats, native + jsQR plug-ins |
 | `src/camera/` | Camera open/close and error classification |
 | `src/features/receiver/` | Scanner loop, scan-region geometry, Receive screen |
-| `src/features/files/` | Save / Share for verified files |
+| `src/features/files/` | Save / Save as… (streaming) / Share / Delete for verified files |
+| `src/storage/` | IndexedDB chunk + session stores, persistence wiring, storage estimates |
+| `src/app/Home.tsx` | Received / incomplete transfers, storage panel, restore notice |
 | `src/vendor/jsqr/` | Vendored jsQR (Apache-2.0) + types |
 | `src/components/` | `QrCanvas`, `SegmentedBar` (scales to tens of thousands of segments) |
 | `e2e/` | Playwright tests and a pixel-exact QR reader used to verify binary frames |
