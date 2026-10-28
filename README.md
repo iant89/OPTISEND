@@ -21,6 +21,8 @@ npm run test:e2e     # 17 browser tests (needs `npm run build`, Playwright Chrom
 npm run typecheck
 ```
 
+GitHub Actions runs type checks, the build, unit and optical tests, QR capacity verification, and Chromium end-to-end tests on pushes and pull requests. CI uses Node.js 22, Python 3.11, NumPy, and OpenCV's contrib package; its browser tests run serially to reduce resource contention.
+
 Runtime dependencies: `react`, `react-dom`, and two vendored QR decoders:
 - ZXing-C++ as WebAssembly (`zxing-wasm` 3.1.5, MIT + Apache-2.0) in `src/vendor/zxing-wasm/`, unmodified. The build copies `zxing_reader.wasm` (about 950 KB) to `dist/assets/`, and the app loads it from there, never from a CDN.
 - jsQR in `src/vendor/jsqr/` (Apache-2.0), performance-modified: about 2.4× faster and proven bit-identical to upstream (see the README there).
@@ -28,6 +30,10 @@ Runtime dependencies: `react`, `react-dom`, and two vendored QR decoders:
 The QR encoder, SHA-256 and the protocol are in-house.
 
 The camera only works on a secure page (https:// or localhost). To test on a phone, serve `dist/` over HTTPS.
+
+### GitHub Pages
+
+The Pages workflow builds and deploys `dist/` on pushes to `main`, or when run manually from the Actions tab. In repository settings, set **Pages → Build and deployment → Source** to **GitHub Actions**. The deployed site is available at https://iant89.github.io/OPTISEND/ after a successful deployment.
 
 ## Phase 2 — Sender
 
