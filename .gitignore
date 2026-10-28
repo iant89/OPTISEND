@@ -1,0 +1,7 @@
+node_modules/
+dist/
+bench/corpus.bin
+bench/*.cpuprofile
+bench/*.json
+dist-harness/
+bench/sendrate/log-*.txt
