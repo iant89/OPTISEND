@@ -137,3 +137,15 @@ Simulator results: 12 scans/s cap, three camera poses (seed 2 is the awkward ang
 - **Individual times move by ±1–5 s from run to run,** because jitter and mask choice change which frames land. The worst case is what improved.
 
 Real app check with the new code (Chromium fake webcam, awkward angle, 200 ms per code): **received in 16 s** (simulator: 16.3 s). Before the change this configuration never completed.
+
+## Torn frames mostly still decode
+
+Measured with `tornDecoded` in `sim.ts` (rotating masks, scan jitter, 12 scans/s cap, this machine). A frame counts as torn if any row was exposed across a code switch.
+
+| Per code | Seed 1: torn / still decoded (of all scans) | Seed 3: torn / still decoded (of all scans) |
+|---|---|---|
+| 200 ms | 28 / 27 (of 112) | 25 / 24 (of 124) |
+| 150 ms | 20 / 14 (of 84) | 30 / 21 (of 122) |
+| 100 ms | 43 / 40 (of 83) | 27 / 24 (of 67) |
+
+The tear is usually a soft blend over part of the code, which QR error correction absorbs, and the frame decodes as one of the two codes. At the 200 ms default, torn frames that fail cost about 1% of decode attempts, and about 7% at 150 ms. Rejecting torn frames before decoding (for example with a sender border whose colour alternates per code) would discard far more good decodes than it saves.

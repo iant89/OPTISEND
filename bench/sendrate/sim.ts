@@ -64,6 +64,8 @@ export interface SimResult {
   theoreticalBps: number;
   scans: number;
   tornFrames: number;
+  /** Torn frames that still decoded to a packet. */
+  tornDecoded: number;
   avgDecodeMs: number;
   /** The engine's own per-file timing (first captured chunk → verified), as the app displays it. */
   fileElapsedMs: number | null;
@@ -173,7 +175,7 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
   const nt = noise();
   const dataIdx = new Set(p.frames.map((f, i) => (f.kind === 'data' ? i : -1)).filter((i) => i >= 0));
   const capturedFirstPass = new Set<number>();
-  let scans = 0, torn = 0, decodeTotal = 0, completeMs: number | null = null;
+  let scans = 0, torn = 0, tornDecoded = 0, decodeTotal = 0, completeMs: number | null = null;
   let busyUntil = 0, lastAttempt = -Infinity;
   const nextGap = () => (c.jitter ? nextScanGap(c.maxFps, rnd) : 1000 / c.maxFps);
   let gap = nextGap();
@@ -238,6 +240,7 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
     if (pkt || hit) missesInMode = 0;
     else if (++missesInMode >= 2) { missesInMode = 0; regionMode = (regionMode + 1) % 2; }
     if (!pkt) continue;
+    if (isTorn) tornDecoded++;
     simNow = busyUntil;
     const res = await engine.ingest(pkt);
     // Which code was it? (match bytes against the plan's packets)
@@ -258,7 +261,7 @@ export async function simulate(p: Prepared, c: SimConfig, masks: 'fixed' | 'rota
     passesNeeded: completeMs === null ? null : completeMs / passMs,
     goodputBps: completeMs === null ? null : (payload * 1000) / completeMs,
     theoreticalBps: (payload * 1000) / passMs,
-    scans, tornFrames: torn,
+    scans, tornFrames: torn, tornDecoded,
     avgDecodeMs: scans ? decodeTotal / scans : 0,
     fileElapsedMs: completeMs === null ? null : engine.snapshot()[0]?.files[0]?.timing.elapsedMs ?? null,
   };
