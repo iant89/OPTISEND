@@ -16,7 +16,7 @@ Offline file transfer between devices using only a screen and a camera. No uploa
 npm install
 npm run dev          # http://localhost:5173 (esbuild, rebuilds on change)
 npm run build        # static site in dist/ (deploy anywhere; camera needs HTTPS in Phase 3)
-npm test             # 161 unit tests (node:test via tsx)
+npm test             # 162 unit tests (node:test via tsx)
 npm run test:e2e     # 17 browser tests (needs `npm run build`, Playwright Chromium, python3 + opencv)
 npm run typecheck
 ```
@@ -32,7 +32,7 @@ The camera only works on a secure page (https:// or localhost). To test on a pho
 ## Phase 2 — Sender
 
 - **Send screen:** native picker (multiple files), drag-and-drop on desktop, per-file remove / clear all, sizes and totals. Hashing runs in a Web Worker and is cached per file, so changing settings never re-hashes.
-- **Settings:** density presets (Conservative v15-M · Balanced v25-M · High throughput v40-L) or custom version / ECC / payload limit; 500 ms–1.5 s per code; 1, 2, 3 or 5 passes, or loop until stopped; sequential or interleaved files; manifest repeat interval; hold manifest frames 2×; text-safe vs binary transport. Settings persist in localStorage.
+- **Settings:** density presets (Conservative v15-M · Balanced v25-M · High throughput v40-L) or custom version / ECC / payload limit; 50 ms–1.5 s per code (100 ms default; 66 and 50 ms are marked fast); 1, 2, 3 or 5 passes, or loop until stopped; sequential or interleaved files; manifest repeat interval; hold manifest frames 2×; text-safe vs binary transport. Settings persist in localStorage.
 - **Estimate:** QR codes per pass, bytes per code, pass time, total time and best-case rate. These are computed before hashing, and a test checks they match the real plan frame for frame. A preview shows the first code.
 - **Transmission view:** full-screen where supported, with the screen kept awake. The QR is drawn at whole device pixels per module, with the quiet zone and no blur or stretching. It shows file and chunk position, pass number and a segmented per-pass bar. Controls: pause/resume, previous/next, live interval change, Stop, Finish and Repeat pass. Keyboard: Space toggles pause, ←/→ step. It pauses automatically if the page is hidden, since a hidden page shows no code.
 - **Honest completion:** the summary says what was displayed and states plainly that only the receiver can confirm a file is complete (spec §8.3).
@@ -45,7 +45,7 @@ The camera only works on a secure page (https:// or localhost). To test on a pho
   - *Automatic*: ZXing-C++ (WebAssembly) in a worker first (raw bytes, so binary mode works everywhere), then the built-in `BarcodeDetector` where available. jsQR is used only if the WebAssembly cannot load (no WebAssembly support, CSP, or the file is missing).
   - *ZXing only*, *jsQR only*, *Built-in only*: single decoders, for testing. Each falls back to jsQR if its decoder is unavailable.
   - *Compare all*: runs every decoder on every frame and records reads, accepts, rescues and timings, shown under Scanner settings & diagnostics. Use it on real phones to confirm the simulated results below.
-- **Scanning loop:** uses `requestVideoFrameCallback`, falling back to rAF. At most 12 scans per second, never more than one decode in flight. It crops to the guide square and downscales to a size based on the QR version. It alternates with the full frame until a code is found, so a phone held too close still scans. Before jsQR it applies a 3×3 luminance smoothing pass, which in simulation raised v15 decoding from 15/24 to 21/24 frames and made it faster. Scanning pauses while the page is hidden.
+- **Scanning loop:** uses `requestVideoFrameCallback`, falling back to rAF. Every camera frame is a scan attempt (the old 12/s cap is gone, see below), never more than one decode in flight. It crops to the guide square and downscales to a size based on the QR version. It alternates with the full frame until a code is found, so a phone held too close still scans. Before jsQR it applies a 3×3 luminance smoothing pass, which in simulation raised v15 decoding from 15/24 to 21/24 frames and made it faster. Scanning pauses while the page is hidden.
 - **Receive screen:** live preview with a scan guide, and a brief green pulse on each new chunk (none for duplicates). Each file gets a segmented bar, byte-based %, chunk counts and a status badge: Receiving, Verifying, ✓ Verified, or ✕ Failed with "Discard and receive again". It also shows valid, missing, duplicate and invalid counts, Pause/Resume and Stop. Screen-reader announcements and optional vibration fire when a file verifies.
 - **Saving:** Save (object URL + download) and Share… (Web Share with files, which is the best path on iOS). MIME types are allow-listed; HTML and SVG always download as octet-stream. File names are sanitised.
 - **App-level engine:** leaving the receive screen keeps partial and finished transfers. The home screen lists received files (with Save) and incomplete ones (with Resume). For now this lasts only while the page is open; Phase 4 adds IndexedDB.
@@ -157,6 +157,13 @@ In the browser test (`e2e/receiver.test.ts`), the same two files took 6 filmed f
 **Limits:**
 - The camera model is an assumption: real screens, cameras, auto white balance and video compression decide. Test on real device pairs, with Compare-all diagnostics and the "colour frames" counter.
 - Older OptiSend receivers read only the black-and-white file-list frames.
+
+### Faster sending: 100 ms default, no scan cap, pipelined scanning
+From `bench/sendrate/REPORT.md` ("With ZXing: the scan cap was the bottleneck"):
+- **No scan cap:** with ZXing decoding in about 6 ms, the receiver looks at every camera frame. The 12/s cap, set for jsQR, made sending faster than about 100 ms per code fail.
+- **Pipelined scanning:** the next frame is captured and located on the main thread while the previous one decodes in a worker. At most one captured frame waits, so there is never a backlog and the newest frame always wins. This is what keeps a 3× slower phone at 99–100% first-pass capture at 66–50 ms.
+- **Repeat frames skipped:** a frame that looks the same as the last fully decoded one (32×32 thumbnail, `src/features/receiver/dedupe.ts`) isn't decoded again. This saves decodes and battery, not time. Shown in the diagnostics as "repeat frames skipped".
+- **100 ms per code by default:** twice as fast as 200 ms, and every code is still captured in the first pass in the simulator, including a dim-light 15 fps camera. 66 ms and 50 ms are offered as fast options (the sender says they need a 30 fps camera and good light). Settings still on an earlier default (200 ms, or 750 ms from v1) move to 100 ms; other choices are kept.
 
 ### Default transport is text-safe (Base45)
 The browser e2e test showed that desktop QR decoders return byte-mode content as *text* and cut it off at the first zero byte, so every binary frame was rejected (safely, by CRC/length checks). `BarcodeDetector.rawValue` and phone camera apps are text-only too. Text-safe mode works with any scanner and costs about 3% capacity. Binary mode stays available for receivers that read raw bytes.

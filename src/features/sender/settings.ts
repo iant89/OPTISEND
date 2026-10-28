@@ -40,8 +40,15 @@ export interface SenderSettings {
   colorLayers: ColorLayers;
 }
 
-/** 200 ms is the default: the send-rate benchmark (status/sendrate-benchmark.md) found it ~3× faster than 750 ms with similar reliability. */
-export const INTERVAL_CHOICES = [200, 300, 500, 750, 1000, 1500] as const;
+/**
+ * 100 ms is the default: with ZXing and an uncapped, pipelined scanner the send-rate
+ * benchmark (bench/sendrate/REPORT.md) captures every code in the first pass at 100 ms,
+ * even with a dim-light 15 fps camera. 66 and 50 ms are faster still but need a
+ * 30 fps camera and good light.
+ */
+export const INTERVAL_CHOICES = [50, 66, 100, 200, 300, 500, 750, 1000, 1500] as const;
+/** Intervals below this need a 30 fps camera and good light (the UI says so). */
+export const FAST_INTERVAL_MS = 100;
 export const PASS_CHOICES: readonly PassCount[] = [1, 2, 3, 5, 'continuous'];
 
 export const DEFAULT_SETTINGS: Readonly<SenderSettings> = Object.freeze({
@@ -52,7 +59,7 @@ export const DEFAULT_SETTINGS: Readonly<SenderSettings> = Object.freeze({
   // Text-safe by default: works with every scanner, including text-only ones
   // (BarcodeDetector, OS camera apps) that corrupt binary byte-mode content.
   transport: 'alphanumeric',
-  intervalMs: 200,
+  intervalMs: 100,
   passes: 'continuous',
   strategy: 'sequential',
   manifestEvery: 50,
@@ -156,7 +163,7 @@ export function sanitizeSettings(raw: unknown): SenderSettings {
     customEcc: eccs.includes(r.customEcc as EccLevel) ? (r.customEcc as EccLevel) : d.customEcc,
     customPayload: isInt(r.customPayload, 0, 4096) ? (r.customPayload as number) : d.customPayload,
     transport: r.transport === 'alphanumeric' || r.transport === 'byte' ? r.transport : d.transport,
-    intervalMs: isInt(r.intervalMs, 100, 10_000) ? (r.intervalMs as number) : d.intervalMs,
+    intervalMs: isInt(r.intervalMs, 50, 10_000) ? (r.intervalMs as number) : d.intervalMs,
     passes: r.passes === 'continuous' || isInt(r.passes, 1, 1000) ? (r.passes as PassCount) : d.passes,
     strategy: r.strategy === 'round-robin' || r.strategy === 'sequential' ? r.strategy : d.strategy,
     manifestEvery: isInt(r.manifestEvery, 0, 100_000) ? (r.manifestEvery as number) : d.manifestEvery,
@@ -173,11 +180,14 @@ function clampInt(v: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, Math.round(Number.isFinite(v) ? v : min)));
 }
 
+/** Earlier defaults for the time per code: 750 ms (settings v1), then 200 ms (v2). */
+export const PREVIOUS_DEFAULT_INTERVALS: readonly number[] = [750, 200];
+
 /**
- * Settings saved before the 200 ms default: keep the user's other choices, but an
- * interval equal to the old 750 ms default moves to the new default.
+ * Settings saved under an earlier default: keep the user's other choices, but an
+ * interval equal to a previous default moves to the current default.
  */
 export function migrateLegacySettings(raw: unknown): SenderSettings {
   const s = sanitizeSettings(raw);
-  return s.intervalMs === 750 ? { ...s, intervalMs: DEFAULT_SETTINGS.intervalMs } : s;
+  return PREVIOUS_DEFAULT_INTERVALS.includes(s.intervalMs) ? { ...s, intervalMs: DEFAULT_SETTINGS.intervalMs } : s;
 }
