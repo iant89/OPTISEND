@@ -1,5 +1,6 @@
 import { useEffect, useState } from 'react';
 import { ReceiveScreen, type ReceiverPrefs } from '../features/receiver/ReceiveScreen.tsx';
+import { DECODER_MODES } from '../features/receiver/decoders.ts';
 import { ReceiverStorage } from '../storage/persistence.ts';
 import { Home } from './Home.tsx';
 import type { TransferPlan } from '../protocol/sender.ts';
@@ -25,7 +26,7 @@ function loadRxPrefs(): ReceiverPrefs {
   try {
     const r = JSON.parse(localStorage.getItem(RX_PREFS_KEY) ?? 'null') as Partial<ReceiverPrefs> | null;
     return {
-      decoderMode: r?.decoderMode && ['auto', 'jsqr', 'native', 'compare'].includes(r.decoderMode) ? r.decoderMode : d.decoderMode,
+      decoderMode: r?.decoderMode && DECODER_MODES.includes(r.decoderMode) ? r.decoderMode : d.decoderMode,
       vibrate: typeof r?.vibrate === 'boolean' ? r.vibrate : d.vibrate,
     };
   } catch {

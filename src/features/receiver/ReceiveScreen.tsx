@@ -61,9 +61,10 @@ export function ReceiveScreen({ storage, prefs, setPrefs, onExit }: Props) {
         video.srcObject = stream;
         await video.play().catch(() => undefined);
         const { chain } = await buildDecoderChain(prefs.decoderMode);
+        const zxingFirst = chain.ids[0] === 'zxing';
         if (disposed) { chain.dispose(); return; }
         chainDispose = () => chain.dispose();
-        const scanner = new FrameScanner(video, chain, (packet) => { void engine.ingest(packet); });
+        const scanner = new FrameScanner(video, chain, (packet) => { void engine.ingest(packet); }, { alternateGuide: !zxingFirst });
         scannerRef.current = scanner;
         scanner.start();
         setCam({ kind: 'live' });

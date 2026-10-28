@@ -19,6 +19,12 @@ export interface ScannerOptions {
   random?: () => number;
   /** Fraction of the video's shorter side covered by the scan square. */
   regionFraction?: number;
+  /**
+   * After a miss on a located code, decode the guide square next (default true).
+   * Helps jsQR, whose failures depend on the crop; ZXing reads the tight crop
+   * at least as well as the guide square, so it turns this off.
+   */
+  alternateGuide?: boolean;
 }
 
 export interface ScannerStats {
@@ -88,15 +94,15 @@ export interface CropState {
 
 /**
  * Choose the crop for this frame, or null to skip decoding it.
- *  - Code located: the tight crop around it, alternating with the guide square
- *    after each miss (jsQR's failures on different crops are largely
+ *  - Code located: the tight crop around it. With `alternateGuide`, the guide
+ *    square after each miss (jsQR's failures on different crops are largely
  *    independent, and dense codes sometimes decode only in the larger crop).
  *  - Nothing located: skip, except every UNLOCATED_DECODE_EVERY-th frame,
  *    which decodes the guide square, switching to the whole frame after two
  *    misses (the pre-locator behaviour), so a locator miss costs little.
  */
-export function chooseCrop(located: boolean, st: CropState): CropKind | null {
-  if (located) return st.locatedMisses % 2 === 0 ? 'located' : 'guide';
+export function chooseCrop(located: boolean, st: CropState, alternateGuide = true): CropKind | null {
+  if (located) return alternateGuide && st.locatedMisses % 2 === 1 ? 'guide' : 'located';
   if (st.unlocated % UNLOCATED_DECODE_EVERY !== 0) return null;
   return (st.fallbackMisses >> 1) % 2 === 0 ? 'guide' : 'frame';
 }
@@ -119,6 +125,7 @@ export class FrameScanner {
   readonly stats: ScannerStats = { framesScanned: 0, framesWithCode: 0, packets: 0, foreign: 0, framesLocated: 0, framesSkipped: 0, fps: 0, lastDecoder: null, lastVersion: null };
   private readonly maxFps: number;
   private readonly fraction: number;
+  private readonly alternateGuide: boolean;
   private readonly crop: CropState = { locatedMisses: 0, unlocated: 0, fallbackMisses: 0 };
 
   constructor(
@@ -129,6 +136,7 @@ export class FrameScanner {
   ) {
     this.maxFps = opts.maxFps ?? 12;
     this.fraction = opts.regionFraction ?? 0.85;
+    this.alternateGuide = opts.alternateGuide ?? true;
     this.random = opts.random ?? Math.random;
     this.gap = nextScanGap(this.maxFps, this.random);
     [this.canvas, this.ctx] = readableCanvas();
@@ -204,7 +212,7 @@ export class FrameScanner {
       } else {
         this.crop.unlocated++;
       }
-      const kind = chooseCrop(!!loc, this.crop);
+      const kind = chooseCrop(!!loc, this.crop, this.alternateGuide);
       if (!kind) {
         this.stats.framesSkipped++;
         return false;

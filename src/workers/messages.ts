@@ -16,3 +16,6 @@ export type QrResponse =
 import type { ScanHit } from '../qr/decoders/types.ts';
 export type ScanRequest = { id: number; data: Uint8ClampedArray; width: number; height: number };
 export type ScanResponse = { id: number; hit: ScanHit | null };
+
+export type ZxingInit = { kind: 'init'; wasmUrl: string };
+export type ZxingStatus = { kind: 'ready' } | { kind: 'error'; message: string };

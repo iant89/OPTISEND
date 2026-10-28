@@ -9,6 +9,8 @@ const outdir = 'dist/assets';
 await rm('dist', { recursive: true, force: true });
 await mkdir(outdir, { recursive: true });
 await cp('public', 'dist', { recursive: true });
+// ZXing-C++ WebAssembly, loaded at runtime next to the bundles (never from a CDN).
+await cp('src/vendor/zxing-wasm/zxing_reader.wasm', `${outdir}/zxing_reader.wasm`);
 
 const options = {
   entryPoints: {
@@ -16,6 +18,7 @@ const options = {
     'qr.worker': 'src/workers/qr.worker.ts',
     'hash.worker': 'src/workers/hash.worker.ts',
     'scan.worker': 'src/workers/scan.worker.ts',
+    'zxing.worker': 'src/workers/zxing.worker.ts',
     styles: 'src/app/styles.css',
   },
   outdir,

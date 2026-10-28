@@ -1,4 +1,8 @@
 /** Test-side stand-ins for what the browser scanner does with a canvas. */
+import type { QrMatrix } from '../src/qr/encoder.ts';
+import type { ScanFrame } from '../src/qr/decoders/types.ts';
+import { readFileSync } from 'node:fs';
+import { loadZxing } from '../src/qr/decoders/zxing-core.ts';
 
 /** Area-average resize of a grey sub-image (like drawImage with smoothing) → grey w×h. */
 export function resizeGray(src: Uint8Array, srcW: number, sx: number, sy: number, sw: number, sh: number, dw: number, dh: number): Uint8Array {
@@ -23,4 +27,31 @@ export function grayToRgba(g: Uint8Array): Uint8ClampedArray {
   const out = new Uint8ClampedArray(g.length * 4);
   for (let i = 0, k = 0; i < g.length; i++, k += 4) { out[k] = out[k + 1] = out[k + 2] = g[i]!; out[k + 3] = 255; }
   return out;
+}
+
+/** Render a matrix to RGBA at `scale` px/module with a 4-module quiet zone, optionally offset in a larger canvas. */
+export function rasterize(m: QrMatrix, scale: number, pad = 0): ScanFrame {
+  const n = m.size + 8;
+  const W = n * scale + pad * 2;
+  const data = new Uint8ClampedArray(W * W * 4).fill(255);
+  for (let y = 0; y < m.size; y++) {
+    for (let x = 0; x < m.size; x++) {
+      if (!m.modules[y * m.size + x]) continue;
+      for (let dy = 0; dy < scale; dy++) {
+        for (let dx = 0; dx < scale; dx++) {
+          const i = ((pad + (y + 4) * scale + dy) * W + pad + (x + 4) * scale + dx) * 4;
+          data[i] = data[i + 1] = data[i + 2] = 0;
+        }
+      }
+    }
+  }
+  return { data, width: W, height: W };
+}
+
+export const ZXING_WASM_PATH = 'src/vendor/zxing-wasm/zxing_reader.wasm';
+
+/** Load the vendored ZXing WebAssembly from disk (Node has no fetch of relative URLs). */
+export async function loadZxingForTests(): Promise<void> {
+  const b = readFileSync(ZXING_WASM_PATH);
+  await loadZxing({ wasmBinary: b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength) });
 }

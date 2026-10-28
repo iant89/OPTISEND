@@ -88,6 +88,9 @@ test('sender app → simulated phone camera → receiver app: files verified and
   const page = await ctx.newPage();
   const errors: string[] = [];
   page.on('pageerror', (e) => errors.push(e.message));
+  // Every request (page and workers) must stay on the app's own server: no CDN for the ZXing WebAssembly.
+  const requests: string[] = [];
+  ctx.on('request', (r) => requests.push(r.url()));
   await page.goto(server.url);
   await page.getByRole('button', { name: /Receive transfer/ }).click();
   await page.getByText('Receiving…').or(page.getByText('All files received and verified')).first().waitFor({ timeout: 60_000 });
@@ -119,6 +122,16 @@ test('sender app → simulated phone camera → receiver app: files verified and
   }
   const diag = await page.evaluate(() => document.querySelector('.stats.compact')?.textContent ?? '');
   console.log(`# ${shots.length} codes filmed; receiver stats: ${diag}`);
+
+  // Automatic mode decoded with ZXing (WebAssembly) in its worker, loaded from the app itself.
+  const decoders = await page.evaluate(() => [...document.querySelectorAll('.diag-table tbody tr')].map((tr) => [...tr.children].map((c) => c.textContent ?? '')));
+  console.log(`# decoders (name, read, accepted, avg ms): ${JSON.stringify(decoders)}`);
+  const zx = decoders.find((r) => r[0]?.startsWith('ZXing'));
+  assert.ok(zx && Number.parseInt(zx[2]!, 10) > 0, `ZXing accepted codes: ${JSON.stringify(decoders)}`);
+  assert.ok(!decoders.some((r) => r[0]?.startsWith('jsQR')), 'jsQR is only a fallback when ZXing is available');
+  assert.ok(requests.some((u) => u.endsWith('/assets/zxing_reader.wasm')), 'WebAssembly loaded from the app');
+  const foreign = requests.filter((u) => !u.startsWith(server.url) && !u.startsWith('blob:') && !u.startsWith('data:'));
+  assert.deepEqual(foreign, []);
 
   // Leaving the receiver keeps the files; the home screen lists them.
   await page.getByRole('button', { name: 'Stop receiving' }).click();
@@ -161,3 +174,23 @@ for (const [errName, expectTitle, expectHelp] of [
     }
   });
 }
+
+test('if the ZXing WebAssembly cannot load, the receiver falls back to jsQR', { timeout: 60_000 }, async () => {
+  const browser = await chromium.launch({ args: ['--use-fake-ui-for-media-stream', '--use-fake-device-for-media-stream'] });
+  try {
+    const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+    await ctx.route('**/zxing_reader.wasm', (r) => r.fulfill({ status: 404, body: 'blocked' }));
+    const page = await ctx.newPage();
+    const errors: string[] = [];
+    page.on('pageerror', (e) => errors.push(e.message));
+    await page.goto(server.url);
+    await page.getByRole('button', { name: /Receive transfer/ }).click();
+    // The decoder table appears once the scanner runs; with ZXing unavailable, Automatic uses jsQR.
+    await page.locator('.diag-table tbody tr').first().waitFor({ state: 'attached', timeout: 20_000 });
+    const names = await page.evaluate(() => [...document.querySelectorAll('.diag-table tbody th')].map((th) => th.textContent ?? ''));
+    assert.deepEqual(names, ['jsQR']);
+    assert.deepEqual(errors, []);
+  } finally {
+    await browser.close();
+  }
+});
